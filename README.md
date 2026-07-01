@@ -13,7 +13,7 @@
 ## 环境要求
 
 - Python 3.10 或更高版本
-- Bader 命令行程序
+- Bader 命令行程序，可选
 - Windows、Linux 或 macOS 桌面环境
 
 ## 安装依赖
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 1. 将 `bader` 或 `bader.exe` 放到项目根目录。
 2. 将 Bader 程序所在目录加入系统 `PATH`。
 
-程序运行 Bader 时会优先检查指定路径，也会检查系统 `PATH`。
+如果已经有 `ACF.dat`，程序可以直接导入并解析，不需要再调用 Bader 生成结果。
 
 ## 运行程序
 
@@ -51,6 +51,51 @@ python main.py
 ```powershell
 pytest
 ```
+
+## 构建 Windows 安装包
+
+项目使用与 DBand Studio 相同的发布链路：先用 PyInstaller 生成目录版程序，再用 Inno Setup 封装安装器。
+
+准备条件：
+
+- 安装 Inno Setup 6，并确保 `ISCC.exe` 可用。
+- 使用包含完整依赖的 Python 环境，例如：
+
+```powershell
+c:\Users\21483\.conda\envs\lis_sac_ml\python.exe
+```
+
+- 可选：准备 Windows 版 `bader.exe`。
+
+源码仓库不上传 `bader` 或 `bader.exe`。如果安装包不包含 Windows 可执行的 `bader.exe`，用户仍可导入已有 `ACF.dat`、`CONTCAR`、`POTCAR` 等文件进行解析、统计和可视化；只是不能在缺少 `ACF.dat` 时由程序自动调用 Bader 生成结果。
+
+构建不内置 Bader 的安装包：
+
+```powershell
+.\installer\build_windows.ps1
+```
+
+构建并内置 Windows 版 Bader：
+
+```powershell
+.\installer\build_windows.ps1 -BaderExe C:\path\to\bader.exe
+```
+
+如果 Inno Setup 没有加入 `PATH`，可以显式指定：
+
+```powershell
+.\installer\build_windows.ps1 `
+  -ISCCPath "C:\Users\21483\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
+```
+
+构建产物：
+
+```text
+dist/BaderChargeAnalyzer/BaderChargeAnalyzer.exe
+dist/BaderChargeAnalyzer_Setup_v0.1.0.exe
+```
+
+安装器支持用户自定义安装位置。安装包不会包含本机已经加载的 `workspaces/`、分组配置、测试缓存或开发目录。安装后的用户工作区会写入用户本地数据目录，不会写入程序安装目录。
 
 ## 项目结构
 
@@ -67,5 +112,3 @@ pytest
 ├── 图标.png         # 当前应用窗口图标
 └── pytest.ini       # pytest 配置
 ```
-
-
