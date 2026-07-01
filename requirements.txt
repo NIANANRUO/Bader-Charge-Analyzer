@@ -1,0 +1,12 @@
+PySide6
+qtawesome
+qdarktheme
+pandas
+numpy
+pymatgen
+matplotlib
+pyvista
+pyvistaqt
+openpyxl
+requests
+Pillow

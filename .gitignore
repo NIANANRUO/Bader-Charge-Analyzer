@@ -1,0 +1,59 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE and local assistant state
+.vscode/
+.idea/
+.workbuddy/
+
+# Local runtime data
+workspaces/
+
+# Local asset backups
+图标_原始备份.png
+
+# Bader executable binaries should be installed separately or placed locally
+bader
+bader.exe
+
+# VASP / Bader large or generated files
+ACF.dat
+AVF.dat
+BCF.dat
+CHGCAR*
+AECCAR*
+POTCAR
+CONTCAR
+POSCAR
+WAVECAR
+CHG
+CHGDIFF
+DOSCAR
+EIGENVAL
+IBZKPT
+OSZICAR
+OUTCAR
+PCDAT
+PROCAR
+vasprun.xml
+XDATCAR
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
