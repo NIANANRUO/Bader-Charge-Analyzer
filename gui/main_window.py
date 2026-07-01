@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, Signal
 
 from core.workspace_manager import WorkspaceManager
+from core.runtime_paths import bundled_bader_candidates
 from gui.analysis_panel import AnalysisPanel
 # Deferred (lazy) imports — these pull in heavy dependencies:
 #   Visualizer3D  → pyvistaqt / VTK  (~10-30s)
@@ -176,7 +177,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(load_app_icon())
         self.resize(1400, 900)
 
-        self.ws_mgr = WorkspaceManager("workspaces")
+        self.ws_mgr = WorkspaceManager()
         self.current_ws = None
         self.selected_workspaces = []
         self._workspace_targets = {}
@@ -1141,7 +1142,7 @@ class MainWindow(QMainWindow):
             "bader.exe", "bader",
             os.path.join("bader_engine", "bader.exe"),
             os.path.join("bader_engine", "bader"),
-        ]
+        ] + [os.fspath(path) for path in bundled_bader_candidates()]
         for path in possible_paths:
             if os.path.exists(path):
                 bader_exe = path

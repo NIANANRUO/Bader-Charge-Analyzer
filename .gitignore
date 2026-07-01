@@ -11,6 +11,8 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+installer/runtime/
+installer/*.ico
 
 # Virtual environments
 .venv/

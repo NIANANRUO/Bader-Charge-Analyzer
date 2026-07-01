@@ -52,6 +52,46 @@ python main.py
 pytest
 ```
 
+## 构建 Windows 安装包
+
+项目使用与 DBand Studio 相同的发布链路：先用 PyInstaller 生成目录版程序，再用 Inno Setup 封装安装器。
+
+准备条件：
+
+- 安装 Inno Setup 6，并确保 `ISCC.exe` 可用
+- 使用包含完整依赖的 Python 环境，例如：
+
+```powershell
+c:\Users\21483\.conda\envs\lis_sac_ml\python.exe
+```
+
+- 准备 Windows 版 `bader.exe`
+
+注意：源码仓库不上传 `bader` 或 `bader.exe`。Release 安装包需要包含 Windows 可执行的 `bader.exe`，否则用户安装后无法直接运行 Bader 计算。当前根目录如果存在无扩展名 `bader`，它可能是 Linux ELF 文件，不能作为 Windows 安装包里的 Bader 程序使用。
+
+构建命令：
+
+```powershell
+.\installer\build_windows.ps1 -BaderExe C:\path\to\bader.exe
+```
+
+如果 Inno Setup 没有加入 `PATH`，可以显式指定：
+
+```powershell
+.\installer\build_windows.ps1 `
+  -BaderExe C:\path\to\bader.exe `
+  -ISCCPath "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+```
+
+构建产物：
+
+```text
+dist/BaderChargeAnalyzer/BaderChargeAnalyzer.exe
+dist/BaderChargeAnalyzer_Setup_v0.1.0.exe
+```
+
+安装器支持用户自定义安装位置。安装包不会包含本机已经加载的 `workspaces/`、分组配置、测试缓存或开发目录。安装后的用户工作区会写入用户本地数据目录，不会写入程序安装目录。
+
 ## 项目结构
 
 ```text
@@ -59,6 +99,7 @@ pytest
 ├── assets/          # 静态资源
 ├── core/            # 文件解析、计算、Bader 调用和工作区管理
 ├── gui/             # PySide6 图形界面
+├── installer/       # PyInstaller 和 Inno Setup 打包配置
 ├── rendering/       # 三维结构渲染和颜色映射
 ├── tests/           # 自动化测试
 ├── main.py          # 程序入口

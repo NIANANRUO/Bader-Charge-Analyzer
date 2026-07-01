@@ -2,14 +2,16 @@ import json
 import os
 import shutil
 
+from core.runtime_paths import default_workspace_root
+
 
 class WorkspaceManager:
     """Manages isolated workspaces for different analysis projects."""
 
     DEFAULT_GROUP = "\u672a\u5206\u7ec4"
 
-    def __init__(self, root_dir="workspaces"):
-        self.root_dir = root_dir
+    def __init__(self, root_dir=None):
+        self.root_dir = os.fspath(root_dir or default_workspace_root())
         self.groups_path = os.path.join(self.root_dir, "workspace_groups.json")
         if not os.path.exists(self.root_dir):
             os.makedirs(self.root_dir)

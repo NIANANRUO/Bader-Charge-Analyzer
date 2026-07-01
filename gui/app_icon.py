@@ -3,12 +3,14 @@ from pathlib import Path
 
 from PySide6.QtGui import QIcon
 
+from core.runtime_paths import resource_path
+
 
 APP_ICON_FILENAME = "图标.png"
 
 
 def app_icon_path() -> Path:
-    return Path(__file__).resolve().parent.parent / APP_ICON_FILENAME
+    return resource_path(APP_ICON_FILENAME)
 
 
 def load_app_icon() -> QIcon:
