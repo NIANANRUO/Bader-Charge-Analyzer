@@ -114,14 +114,18 @@ class WorkspaceManager:
 
     def rename_workspace(self, old_name, new_name):
         """Renames a workspace."""
-        old_path = self.get_workspace_path(old_name)
-        new_path = self.get_workspace_path(new_name)
+        old_workspace = (old_name or "").strip()
+        new_workspace = (new_name or "").strip()
+        if not old_workspace or not new_workspace or old_workspace == new_workspace:
+            return False
+        old_path = self.get_workspace_path(old_workspace)
+        new_path = self.get_workspace_path(new_workspace)
         if os.path.exists(old_path) and not os.path.exists(new_path):
             os.rename(old_path, new_path)
-            state = self.load_state(new_name)
-            state["name"] = new_name
-            state.setdefault("display_name", new_name)
-            self.save_state(new_name, state)
+            state = self.load_state(new_workspace)
+            state["name"] = new_workspace
+            state["display_name"] = new_workspace
+            self.save_state(new_workspace, state)
             return True
         return False
 

@@ -47,25 +47,30 @@ class WorkspaceTreeWidget(QTreeWidget):
             super().keyPressEvent(event)
 
     def dropEvent(self, event):
-        item = self.currentItem()
         target = self.itemAt(event.position().toPoint())
-        workspace = item.data(0, Qt.UserRole) if item is not None else None
-        if not workspace or target is None:
+        if target is None:
             event.ignore()
             return
+
         target_workspace = target.data(0, Qt.UserRole)
         target_group_item = target.parent() if target_workspace else target
         if target_group_item is None:
             event.ignore()
             return
+
         group = target_group_item.text(0)
         workspaces = [
             selected.data(0, Qt.UserRole)
             for selected in self.selectedItems()
             if selected.data(0, Qt.UserRole)
         ]
-        if workspace not in workspaces:
-            workspaces = [workspace]
+        current = self.currentItem()
+        current_workspace = current.data(0, Qt.UserRole) if current is not None else None
+        if current_workspace and current_workspace not in workspaces:
+            workspaces = [current_workspace]
+        if not workspaces:
+            event.ignore()
+            return
         event.acceptProposedAction()
         self.workspaceDropped.emit(workspaces, group)
 
@@ -171,13 +176,13 @@ class AtomDetailDialog(QDialog):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, workspace_manager=None):
         super().__init__()
         self.setWindowTitle("Bader Charge Analyzer Pro")
         self.setWindowIcon(load_app_icon())
         self.resize(1400, 900)
 
-        self.ws_mgr = WorkspaceManager()
+        self.ws_mgr = workspace_manager or WorkspaceManager()
         self.current_ws = None
         self.selected_workspaces = []
         self._workspace_targets = {}
@@ -311,7 +316,7 @@ class MainWindow(QMainWindow):
         btn_ws_rename.setFlat(True)
         btn_ws_rename.setFixedSize(30, 28)
         btn_ws_rename.setToolTip("\u91cd\u547d\u540d")
-        btn_ws_rename.clicked.connect(self.rename_ws)
+        btn_ws_rename.clicked.connect(self.rename_selected_item)
         btn_ws_group = QPushButton()
         btn_ws_group.setIcon(qta.icon("fa5s.layer-group"))
         btn_ws_group.setFlat(True)
@@ -811,6 +816,26 @@ class MainWindow(QMainWindow):
         self._syncing_ws_tree = False
         self.refresh_workspace_selection_context()
 
+    def _group_name_for_item(self, item):
+        if item is None:
+            return self.ws_mgr.DEFAULT_GROUP
+        if item.data(0, Qt.UserRole):
+            parent = item.parent()
+            return parent.text(0) if parent is not None else self.ws_mgr.DEFAULT_GROUP
+        return item.text(0) or self.ws_mgr.DEFAULT_GROUP
+
+    def _select_workspace_in_tree(self, workspace_name):
+        for i in range(self.ws_tree.topLevelItemCount()):
+            group_item = self.ws_tree.topLevelItem(i)
+            for j in range(group_item.childCount()):
+                child = group_item.child(j)
+                if child.data(0, Qt.UserRole) == workspace_name:
+                    group_item.setExpanded(True)
+                    self.ws_tree.setCurrentItem(child)
+                    child.setSelected(True)
+                    return child
+        return None
+
     def _selected_workspace_name(self):
         item = self.ws_tree.currentItem()
         if not item:
@@ -901,9 +926,13 @@ class MainWindow(QMainWindow):
 
     def create_ws(self):
         import random
+        target_group = self._group_name_for_item(self.ws_tree.currentItem())
         name = f"Workspace_{random.randint(1000, 9999)}"
         self.ws_mgr.create_workspace(name)
+        self.ws_mgr.update_workspace_meta(name, group=target_group, display_name=name)
+        self.selected_workspaces = [name]
         self.load_workspaces()
+        self._select_workspace_in_tree(name)
 
     def create_group(self):
         group, ok = QInputDialog.getText(self, "\u65b0\u5efa\u5206\u7ec4", "\u5206\u7ec4\u540d\u79f0:")
@@ -974,9 +1003,12 @@ class MainWindow(QMainWindow):
             new_name, ok = QInputDialog.getText(
                 self, "\u91cd\u547d\u540d\u5de5\u4f5c\u533a", "\u65b0\u540d\u79f0:", text=old_name
             )
+            new_name = new_name.strip() if new_name else ""
             if ok and new_name and new_name != old_name:
                 if self.ws_mgr.rename_workspace(old_name, new_name):
+                    self.selected_workspaces = [new_name]
                     self.load_workspaces()
+                    self._select_workspace_in_tree(new_name)
                     self.current_ws = new_name
                     self.update_file_status()
                 else:
@@ -1007,9 +1039,11 @@ class MainWindow(QMainWindow):
         names = [n for n in names if n]
         if not names or not group:
             return
-        self.ws_mgr.move_workspaces_to_group(names, group)
-        self.selected_workspaces = names
+        moved = self.ws_mgr.move_workspaces_to_group(names, group)
+        self.selected_workspaces = moved
         self.load_workspaces()
+        for moved_name in moved:
+            self._select_workspace_in_tree(moved_name)
 
     def move_ws_to_group(self):
         names = self.get_selected_workspace_names()
