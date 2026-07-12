@@ -357,6 +357,31 @@ class MainWindow(QMainWindow):
             "QListWidget { border: none; background: transparent; }"
             " QListWidget::item { padding: 4px; }"
         )
+        file_actions = QHBoxLayout()
+        file_actions.setSpacing(4)
+        self.btn_file_add = QPushButton()
+        self.btn_file_add.setIcon(qta.icon("fa5s.plus"))
+        self.btn_file_add.setToolTip("添加文件")
+        self.btn_file_replace = QPushButton()
+        self.btn_file_replace.setIcon(qta.icon("fa5s.exchange-alt"))
+        self.btn_file_replace.setToolTip("替换选中文件")
+        self.btn_file_delete = QPushButton()
+        self.btn_file_delete.setIcon(qta.icon("fa5s.trash"))
+        self.btn_file_delete.setToolTip("删除选中文件")
+        self.btn_file_folder = QPushButton()
+        self.btn_file_folder.setIcon(qta.icon("fa5s.folder-open"))
+        self.btn_file_folder.setToolTip("打开工作区目录")
+        self.btn_file_add.clicked.connect(self.open_file_dialog)
+        self.btn_file_replace.clicked.connect(self.replace_selected_file)
+        self.btn_file_delete.clicked.connect(self.delete_selected_file)
+        self.btn_file_folder.clicked.connect(self.open_workspace_folder)
+        for button in (
+            self.btn_file_add, self.btn_file_replace,
+            self.btn_file_delete, self.btn_file_folder,
+        ):
+            button.setFixedSize(30, 28)
+            file_actions.addWidget(button)
+        file_actions.addStretch()
 
         project_actions = QHBoxLayout()
         project_actions.setSpacing(6)
@@ -397,6 +422,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(ws_header)
         left_layout.addWidget(self.ws_tree, 1)
         left_layout.addWidget(self.lbl_files)
+        left_layout.addLayout(file_actions)
         left_layout.addWidget(self.list_files, 1)
         left_layout.addWidget(btn_import)
         left_layout.addWidget(btn_new_ws)
@@ -464,9 +490,15 @@ class MainWindow(QMainWindow):
         self.right_stack.setFixedWidth(320)
 
         self.analysis_panel_plot = AnalysisPanel()
+        self.analysis_panel_plot.line_target.textChanged.connect(
+            self._on_target_filter_changed
+        )
         self.analysis_panel_plot.request_calculation.connect(self.run_analysis)
         self.analysis_panel_plot.request_export_csv.connect(self.export_csv)
         self.analysis_panel_plot.request_export_image.connect(self.export_image)
+        self.analysis_panel_plot.request_export_fragments.connect(
+            self.export_fragment_results
+        )
         self.right_stack.addWidget(self.analysis_panel_plot)
 
         # Placeholder for 3D analysis panel (index 1) — replaced on first activation
@@ -600,9 +632,9 @@ class MainWindow(QMainWindow):
         es_lay.addWidget(hdr)
 
         self.tab_element_summary = QTableWidget()
-        self.tab_element_summary.setColumnCount(6)
+        self.tab_element_summary.setColumnCount(7)
         self.tab_element_summary.setHorizontalHeaderLabels(
-            ["元素", "计数", "平均 Bader 电荷", "总和", "最大值", "最小值"]
+            ["元素", "计数", "平均 Bader 电荷", "总和", "标准差", "最大值", "最小值"]
         )
         self.tab_element_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tab_element_summary.setMaximumHeight(180)
@@ -805,9 +837,11 @@ class MainWindow(QMainWindow):
                 item = QTreeWidgetItem([label])
                 item.setIcon(0, qta.icon("fa5s.folder", color="#198754"))
                 item.setData(0, Qt.UserRole, ws)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    0, Qt.Checked if ws in selected_before else Qt.Unchecked
+                )
                 group_item.addChild(item)
-                if ws in selected_before:
-                    item.setSelected(True)
                 total += 1
             if workspaces and all(ws in selected_before for ws in workspaces):
                 group_item.setCheckState(0, Qt.Checked)
@@ -852,32 +886,14 @@ class MainWindow(QMainWindow):
         return None
 
     def get_selected_workspace_names(self):
-        """Return selected workspace names, expanding selected/checked groups."""
-        chosen = set()
-        for item in self.ws_tree.selectedItems():
-            ws_name = item.data(0, Qt.UserRole)
-            if ws_name:
-                chosen.add(ws_name)
-                continue
-            for i in range(item.childCount()):
-                child_name = item.child(i).data(0, Qt.UserRole)
-                if child_name:
-                    chosen.add(child_name)
-
-        for i in range(self.ws_tree.topLevelItemCount()):
-            group_item = self.ws_tree.topLevelItem(i)
-            if group_item.checkState(0) == Qt.Checked:
-                for j in range(group_item.childCount()):
-                    child_name = group_item.child(j).data(0, Qt.UserRole)
-                    if child_name:
-                        chosen.add(child_name)
-
+        """Return batch-selected workspace names from checkboxes only."""
         ordered = []
         for i in range(self.ws_tree.topLevelItemCount()):
             group_item = self.ws_tree.topLevelItem(i)
             for j in range(group_item.childCount()):
-                child_name = group_item.child(j).data(0, Qt.UserRole)
-                if child_name in chosen:
+                child = group_item.child(j)
+                child_name = child.data(0, Qt.UserRole)
+                if child_name and child.checkState(0) == Qt.Checked:
                     ordered.append(child_name)
         return ordered
 
@@ -887,7 +903,9 @@ class MainWindow(QMainWindow):
         self._syncing_ws_tree = True
         group_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
         for i in range(group_item.childCount()):
-            group_item.child(i).setSelected(checked)
+            group_item.child(i).setCheckState(
+                0, Qt.Checked if checked else Qt.Unchecked
+            )
         self._syncing_ws_tree = False
         self.refresh_workspace_selection_context()
 
@@ -895,6 +913,22 @@ class MainWindow(QMainWindow):
         if self._syncing_ws_tree or column != 0:
             return
         if item.data(0, Qt.UserRole):
+            parent = item.parent()
+            if parent is not None:
+                states = [
+                    parent.child(i).checkState(0)
+                    for i in range(parent.childCount())
+                ]
+                if states and all(state == Qt.Checked for state in states):
+                    parent_state = Qt.Checked
+                elif any(state != Qt.Unchecked for state in states):
+                    parent_state = Qt.PartiallyChecked
+                else:
+                    parent_state = Qt.Unchecked
+                self._syncing_ws_tree = True
+                parent.setCheckState(0, parent_state)
+                self._syncing_ws_tree = False
+            self.refresh_workspace_selection_context()
             return
         self.set_group_checked(item, item.checkState(0) == Qt.Checked)
 
@@ -916,7 +950,16 @@ class MainWindow(QMainWindow):
             # current_data after workspace activation).
             _plot_data = self._calculated_data_for_current_selection()
             if _plot_data:
-                self.plot_panel.plot_data(_plot_data)
+                self.plot_panel.plot_data(
+                    _plot_data,
+                    target=self.analysis_panel_plot.line_target.text(),
+                    fragments=self._fragment_expressions_for_workspaces(
+                        list(_plot_data.keys()),
+                        self.analysis_panel_plot.get_fragments(),
+                    ),
+                )
+            else:
+                self.plot_panel.plot_data({}, target="", fragments={})
             if getattr(self.plot_panel, "_ws_all", None):
                 all_ws = set(self.plot_panel._ws_all)
                 selected = set(self.selected_workspaces) & all_ws
@@ -1072,6 +1115,7 @@ class MainWindow(QMainWindow):
         if not ws_name:
             return
         self.current_ws = ws_name
+        self.analysis_panel_plot.set_fragments(self.ws_mgr.get_fragments(ws_name))
         self.lbl_files.setText(f"{self.current_ws} \u4e2d\u7684\u6587\u4ef6")
         self.lbl_status_proj.setText(f"\u9879\u76ee: {self.current_ws}")
         self.update_file_status()
@@ -1098,6 +1142,7 @@ class MainWindow(QMainWindow):
                     self._request_3d_sync()
 
         self._rebuild_multi_compare()
+        self._refresh_fragment_results()
         # Always refresh selection context — this also pushes calculated data
         # to the plot panel so the comparison chart stays in sync.
         self.refresh_workspace_selection_context()
@@ -1118,9 +1163,93 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先选择或创建一个工作区。")
             return
         files, _ = QFileDialog.getOpenFileNames(self, "选择 VASP 文件", "", "所有文件 (*)")
+        overwrite_all = False
         for f in files:
-            self.ws_mgr.import_file(self.current_ws, f)
+            filename = os.path.basename(f)
+            destination = os.path.join(
+                self.ws_mgr.get_workspace_path(self.current_ws), filename
+            )
+            overwrite = overwrite_all
+            if os.path.exists(destination) and not overwrite:
+                reply = QMessageBox.question(
+                    self,
+                    "确认覆盖",
+                    f"工作区“{self.current_ws}”已存在 {filename}。\n"
+                    f"来源：{f}\n\n是否替换？",
+                    QMessageBox.Yes | QMessageBox.YesToAll
+                    | QMessageBox.No | QMessageBox.Cancel,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.Cancel:
+                    break
+                if reply == QMessageBox.No:
+                    continue
+                overwrite_all = reply == QMessageBox.YesToAll
+                overwrite = True
+            self.ws_mgr.import_file(self.current_ws, f, overwrite=overwrite)
+            if filename in self.ws_mgr.CRITICAL_INPUT_FILES:
+                self._invalidate_workspace_cache(self.current_ws, filename)
         self.update_file_status()
+
+    def _selected_imported_filename(self):
+        item = self.list_files.currentItem()
+        return item.data(Qt.UserRole) if item is not None else None
+
+    def replace_selected_file(self):
+        if not self.current_ws:
+            return
+        filename = self._selected_imported_filename()
+        if not filename:
+            QMessageBox.information(self, "替换文件", "请先选择要替换的文件。")
+            return
+        source, _ = QFileDialog.getOpenFileName(
+            self, f"选择用于替换 {filename} 的文件", "", "所有文件 (*)"
+        )
+        if not source:
+            return
+        reply = QMessageBox.question(
+            self, "确认替换",
+            f"确定用以下文件替换 {filename}？\n{source}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.ws_mgr.import_file(
+            self.current_ws, source, overwrite=True, destination_name=filename
+        )
+        self._invalidate_workspace_cache(self.current_ws, filename)
+        self.update_file_status()
+
+    def delete_selected_file(self):
+        if not self.current_ws:
+            return
+        filename = self._selected_imported_filename()
+        if not filename:
+            QMessageBox.information(self, "删除文件", "请先选择要删除的文件。")
+            return
+        reply = QMessageBox.question(
+            self, "确认删除", f"确定删除 {filename}？此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.ws_mgr.delete_file(self.current_ws, filename)
+        self._invalidate_workspace_cache(self.current_ws, filename)
+        self.update_file_status()
+
+    def open_workspace_folder(self):
+        if self.current_ws:
+            os.startfile(self.ws_mgr.get_workspace_path(self.current_ws))
+
+    def _invalidate_workspace_cache(self, workspace, filename):
+        if not self.ws_mgr.invalidate_results(workspace, filename):
+            return
+        self.all_calculated_data.pop(workspace, None)
+        if workspace == self.current_ws:
+            self.current_df = None
+            self.tab_data.setRowCount(0)
+            self.tab_multi_compare.setRowCount(0)
+        self.plot_panel.plot_data(self._calculated_data_for_current_selection())
 
     def update_file_status(self):
         self.list_files.clear()
@@ -1131,12 +1260,21 @@ class MainWindow(QMainWindow):
             return
 
         state = self.ws_mgr.load_state(self.current_ws)
-        imported = state.get("imported_files", [])
+        imported = [
+            filename for filename in state.get("imported_files", [])
+            if os.path.exists(
+                os.path.join(self.ws_mgr.get_workspace_path(self.current_ws), filename)
+            )
+        ]
+        if imported != state.get("imported_files", []):
+            state["imported_files"] = imported
+            self.ws_mgr.save_state(self.current_ws, state)
 
         if imported:
             for f in imported:
                 item = QListWidgetItem(f" {f}")
                 item.setIcon(qta.icon("fa5s.check-circle", color="#198754"))
+                item.setData(Qt.UserRole, f)
                 self.list_files.addItem(item)
         else:
             self.list_files.addItem(" 无文件")
@@ -1151,6 +1289,10 @@ class MainWindow(QMainWindow):
             names = [self.current_ws]
         if not names:
             return
+
+        fragments = config.get("fragments", {}) or {}
+        for name in names:
+            self.ws_mgr.save_fragments(name, fragments)
 
         self._remember_workspace_targets(config)
         if len(names) > 1:
@@ -1189,6 +1331,53 @@ class MainWindow(QMainWindow):
         for name in self.get_selected_workspace_names():
             self._workspace_targets[name] = targets.get(name, default_target)
 
+    def _fragment_expressions_for_workspaces(self, workspaces, fragments=None):
+        definitions = fragments or {}
+        result = {}
+        for workspace in workspaces:
+            workspace_fragments = {}
+            source = definitions or self.ws_mgr.get_fragments(workspace)
+            for name, definition in source.items():
+                overrides = definition.get("overrides", {}) or {}
+                expression = overrides.get(
+                    workspace, definition.get("expression", "")
+                )
+                if str(expression).strip():
+                    workspace_fragments[name] = str(expression).strip()
+            result[workspace] = workspace_fragments
+        return result
+
+    def _refresh_fragment_results(self):
+        from core.calculator import ChargeCalculator, TargetSelectionError
+        names = self.selected_workspaces or ([self.current_ws] if self.current_ws else [])
+        rows = []
+        for workspace in names:
+            data = self.all_calculated_data.get(workspace)
+            if data is None:
+                data = self._load_ws_data_from_disk(workspace)
+            if not data or data.get("df") is None:
+                continue
+            definitions = self.ws_mgr.get_fragments(workspace)
+            expressions = self._fragment_expressions_for_workspaces(
+                [workspace], definitions
+            ).get(workspace, {})
+            for fragment, expression in expressions.items():
+                try:
+                    stats = ChargeCalculator.aggregate_charge(data["df"], expression)
+                except TargetSelectionError as exc:
+                    QMessageBox.warning(
+                        self, "片段定义错误",
+                        f"{workspace} / {fragment}: {exc}",
+                    )
+                    continue
+                rows.append({
+                    "workspace": workspace,
+                    "fragment": fragment,
+                    **stats,
+                })
+        self.analysis_panel_plot.update_fragment_results(rows)
+        return rows
+
     def _config_for_workspace(self, base_config, workspace):
         cfg = dict(base_config)
         targets = base_config.get("targets_by_workspace", {}) or {}
@@ -1197,7 +1386,9 @@ class MainWindow(QMainWindow):
 
     def _calculated_data_for_current_selection(self):
         if not self.selected_workspaces:
-            return dict(self.all_calculated_data)
+            if self.current_ws in self.all_calculated_data:
+                return {self.current_ws: self.all_calculated_data[self.current_ws]}
+            return {}
         return {
             ws: self.all_calculated_data[ws]
             for ws in self.selected_workspaces
@@ -1280,6 +1471,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_fragment_text(sum_str)
         self.plot_panel.plot_data(self._calculated_data_for_current_selection())
         self._rebuild_multi_compare()
+        self._refresh_fragment_results()
         self._request_3d_sync()
 
         # Sync 3D analysis panel elements (was missing after batch)
@@ -1316,25 +1508,30 @@ class MainWindow(QMainWindow):
         # Update summary on Plot right panel
         target_str = self.analysis_panel_plot.line_target.text().strip()
         sum_str = self.analysis_panel_plot.line_fragment.text().strip()
-        total_charge = None
-        if sum_str and not df.empty:
-            from core.calculator import ChargeCalculator
-            total_charge, _ = ChargeCalculator.calculate_custom_sum(
-                df, sum_str, [data["Element"] for _, data in df.iterrows()]
-            )
+        from core.calculator import ChargeCalculator, TargetSelectionError
+        stats = None
+        selected_df = df
+        try:
+            stats = ChargeCalculator.aggregate_charge(df, target_str)
+            selected_df = df[df["Atom"].isin(stats["atom_indices"])]
+        except TargetSelectionError as exc:
+            QMessageBox.warning(self, "目标原子错误", str(exc))
+        total_charge = stats["sum"] if stats else None
 
-        if not df.empty:
-            max_gain_idx = df["Bader_Charge"].idxmax()
-            max_loss_idx = df["Bader_Charge"].idxmin()
-            max_gain = df.loc[max_gain_idx]
-            max_loss = df.loc[max_loss_idx]
+        if not selected_df.empty:
+            max_gain_idx = selected_df["Bader_Charge"].idxmax()
+            max_loss_idx = selected_df["Bader_Charge"].idxmin()
+            max_gain = selected_df.loc[max_gain_idx]
+            max_loss = selected_df.loc[max_loss_idx]
             gain_str = f"{max_gain['Element']}{max_gain['Atom']} ({max_gain['Bader_Charge']:.3f} e)"
             loss_str = f"{max_loss['Element']}{max_loss['Atom']} ({max_loss['Bader_Charge']:.3f} e)"
         else:
             gain_str = "无"
             loss_str = "无"
 
-        self.analysis_panel_plot.update_summary(target_str, total_charge, gain_str, loss_str)
+        self.analysis_panel_plot.update_summary(
+            target_str, total_charge, gain_str, loss_str, stats=stats
+        )
 
         self.plot_panel.set_fragment_text(sum_str)
         self.plot_panel.plot_data(self._calculated_data_for_current_selection())
@@ -1354,6 +1551,25 @@ class MainWindow(QMainWindow):
         self.btn_elem_summary.setEnabled(not df.empty)
         self._update_element_summary()
         self._rebuild_multi_compare()
+        self._refresh_fragment_results()
+
+    def _on_target_filter_changed(self, expression):
+        if self.current_df is None or self.current_df.empty:
+            return
+        from core.calculator import ChargeCalculator, TargetSelectionError
+        display_df = self.current_df
+        if expression.strip():
+            try:
+                stats = ChargeCalculator.aggregate_charge(
+                    self.current_df, expression.strip()
+                )
+            except TargetSelectionError:
+                return
+            display_df = self.current_df[
+                self.current_df["Atom"].isin(stats["atom_indices"])
+            ]
+        self.update_table_view(display_df)
+        self.refresh_workspace_selection_context()
 
     def on_data_subtab_changed(self, index):
         if index == 1:
@@ -1711,6 +1927,38 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "导出失败", f"无法写入 CSV:\n{e}")
 
+    def export_fragment_results(self):
+        rows = self._refresh_fragment_results()
+        if not rows:
+            QMessageBox.information(self, "导出片段统计", "没有可导出的片段统计。")
+            return
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出片段统计", "fragment_statistics.csv",
+            "CSV (*.csv);;Excel (*.xlsx)",
+        )
+        if not path:
+            return
+        import pandas as pd
+        records = []
+        for row in rows:
+            records.append({
+                "工作区": row["workspace"],
+                "片段": row["fragment"],
+                "表达式": row["expression"],
+                "原子编号": ",".join(map(str, row["atom_indices"])),
+                "原子数": row["count"],
+                "电荷转移总和(e)": row["sum"],
+                "平均值(e)": row["mean"],
+                "标准差(e)": row["std"],
+                "最大值(e)": row["max"],
+                "最小值(e)": row["min"],
+            })
+        frame = pd.DataFrame(records)
+        if "xlsx" in selected_filter.lower() or path.lower().endswith(".xlsx"):
+            frame.to_excel(path, index=False, engine="openpyxl")
+        else:
+            frame.to_csv(path, index=False, encoding="utf-8-sig")
+
     def export_image(self):
         idx = self.center_stack.currentIndex()
         if idx == 1:
@@ -1789,29 +2037,35 @@ class MainWindow(QMainWindow):
         """Build a pandas DataFrame representing the multi-compare table (incl. summary)."""
         import pandas as pd
         ws_names = list(calculated.keys())
-        first_df = calculated[ws_names[0]]["df"]
-
-        data = {
-            "Atom": first_df["Atom"].values,
-            "Element": first_df["Element"].values,
-            "ZVAL": first_df.get("ZVAL", pd.Series(dtype=float)).values,
-            "X": first_df["X"].values,
-            "Y": first_df["Y"].values,
-            "Z": first_df["Z"].values,
-        }
+        metadata_columns = ["Atom", "Element", "ZVAL", "X", "Y", "Z"]
+        metadata = None
+        charge_data = None
         for ws in ws_names:
             df_ws = calculated[ws]["df"]
-            charges = df_ws["Bader_Charge"].values
-            col_name = f"{ws}_Bader_Charge"
-            if (self._delta_mode and ws != self._baseline_ws
-                    and self._baseline_ws in calculated):
-                base_charges = calculated[self._baseline_ws]["df"]["Bader_Charge"].values
-                delta = charges.astype(float) - base_charges.astype(float)
-                data[f"\u0394_{ws}"] = delta[: len(first_df)]
-            else:
-                data[col_name] = charges[: len(first_df)]
+            available_meta = [
+                column for column in metadata_columns if column in df_ws.columns
+            ]
+            ws_meta = df_ws[available_meta].drop_duplicates("Atom").set_index("Atom")
+            metadata = ws_meta if metadata is None else metadata.combine_first(ws_meta)
+            ws_charge = (
+                df_ws[["Atom", "Bader_Charge"]]
+                .drop_duplicates("Atom")
+                .rename(columns={"Bader_Charge": f"{ws}_Bader_Charge"})
+                .set_index("Atom")
+            )
+            charge_data = (
+                ws_charge if charge_data is None
+                else charge_data.join(ws_charge, how="outer")
+            )
 
-        result = pd.DataFrame(data)
+        result = metadata.join(charge_data, how="outer").sort_index().reset_index()
+        if self._delta_mode and self._baseline_ws in calculated:
+            baseline_column = f"{self._baseline_ws}_Bader_Charge"
+            for ws in ws_names:
+                column = f"{ws}_Bader_Charge"
+                if ws != self._baseline_ws:
+                    result[f"\u0394_{ws}"] = result[column] - result[baseline_column]
+                    result.drop(columns=[column], inplace=True)
 
         # Append summary rows
         charge_cols = [c for c in result.columns if c not in ("Atom", "Element", "ZVAL", "X", "Y", "Z")]
@@ -2265,7 +2519,8 @@ class MainWindow(QMainWindow):
             return
 
         grouped = df.groupby("Element")["Bader_Charge"]
-        stats = grouped.agg(["count", "mean", "sum", "max", "min"])
+        stats = grouped.agg(["count", "mean", "sum", "std", "max", "min"])
+        stats["std"] = stats["std"].fillna(0.0)
         stats = stats.sort_index()
 
         self.tab_element_summary.setRowCount(len(stats))
@@ -2275,6 +2530,7 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(str(int(s["count"]))),
                 QTableWidgetItem(f"{s['mean']:.4f}"),
                 QTableWidgetItem(f"{s['sum']:.4f}"),
+                QTableWidgetItem(f"{s['std']:.4f}"),
                 QTableWidgetItem(f"{s['max']:.4f}"),
                 QTableWidgetItem(f"{s['min']:.4f}"),
             ]
@@ -2374,6 +2630,9 @@ class MainWindow(QMainWindow):
             path = os.path.join(ws_path, "results.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(records, f, indent=2, ensure_ascii=False)
+            state = self.ws_mgr.load_state(ws_name)
+            state["calculated"] = True
+            self.ws_mgr.save_state(ws_name, state)
         except Exception:
             pass  # non-critical
 

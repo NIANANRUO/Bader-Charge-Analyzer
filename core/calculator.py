@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 import re
 
+
+class TargetSelectionError(ValueError):
+    """Raised when an atom-selection expression cannot be resolved safely."""
+
+
 class ChargeCalculator:
     """Handles the computation of Net Charges and Custom Segment Summation."""
     
@@ -97,21 +102,34 @@ class ChargeCalculator:
             return list(range(1, total_atoms + 1))
             
         target_indices = set()
+        known_elements = set(elements)
         parts = [p.strip() for p in re.split(r'[,\s]+', target_str) if p.strip()]
         
         for part in parts:
             if re.match(r'^\d+(-\d+)?$', part):
                 if '-' in part:
                     start, end = map(int, part.split('-'))
+                    if start > end:
+                        raise TargetSelectionError(f"原子范围不能倒序: {part}")
+                    if start < 1 or end > total_atoms:
+                        raise TargetSelectionError(f"原子编号超出有效范围 1-{total_atoms}: {part}")
                     target_indices.update(range(start, end + 1))
                 else:
-                    target_indices.add(int(part))
+                    atom_index = int(part)
+                    if atom_index < 1 or atom_index > total_atoms:
+                        raise TargetSelectionError(
+                            f"原子编号超出有效范围 1-{total_atoms}: {part}"
+                        )
+                    target_indices.add(atom_index)
             else:
-                # Element symbol
+                if part not in known_elements:
+                    raise TargetSelectionError(f"未知元素: {part}")
                 for i, el in enumerate(elements, start=1):
                     if el == part:
                         target_indices.add(i)
-                        
+
+        if not target_indices:
+            raise TargetSelectionError(f"表达式未匹配任何原子: {target_str}")
         return sorted(list(target_indices))
 
     @staticmethod
@@ -127,3 +145,78 @@ class ChargeCalculator:
         total_charge = filtered_df['Bader_Charge'].sum()
         
         return total_charge, target_indices
+
+    @staticmethod
+    def aggregate_charge(df, expression=""):
+        """Return one consistent statistics payload for an atom selection."""
+        if df is None or df.empty:
+            raise TargetSelectionError("没有可用于统计的原子数据")
+        elements = df.sort_values("Atom")["Element"].astype(str).tolist()
+        total_atoms = int(df["Atom"].max())
+        indices = ChargeCalculator.parse_target_atoms(expression, total_atoms, elements)
+        selected = df[df["Atom"].isin(indices)]["Bader_Charge"].astype(float)
+        if selected.empty:
+            raise TargetSelectionError(f"表达式未匹配任何原子: {expression}")
+        return {
+            "expression": expression or "",
+            "atom_indices": sorted(int(value) for value in df[df["Atom"].isin(indices)]["Atom"]),
+            "count": int(selected.count()),
+            "sum": float(selected.sum()),
+            "mean": float(selected.mean()),
+            "std": float(selected.std()) if len(selected) > 1 else 0.0,
+            "max": float(selected.max()),
+            "min": float(selected.min()),
+        }
+
+    @staticmethod
+    def aggregate_by_element(df, metric="sum"):
+        """Aggregate Bader charge transfer by element using sum or mean."""
+        if metric not in {"sum", "mean"}:
+            raise ValueError("元素聚合方式必须为 sum 或 mean")
+        if df is None or df.empty:
+            return {}
+        grouped = df.groupby("Element")["Bader_Charge"]
+        values = grouped.sum() if metric == "sum" else grouped.mean()
+        return {str(element): float(value) for element, value in values.items()}
+
+    @staticmethod
+    def prepare_plot_data(data_dict, level="atom", metric="sum", fragments=None, target=""):
+        """Build plot-ready DataFrames at atom, fragment, or element level."""
+        prepared = {}
+        fragments = fragments or {}
+        for workspace, payload in (data_dict or {}).items():
+            df = payload.get("df")
+            if df is None:
+                continue
+            if level == "atom":
+                plot_df = df.copy()
+                if target.strip() and not plot_df.empty:
+                    elements = plot_df.sort_values("Atom")["Element"].astype(str).tolist()
+                    indices = ChargeCalculator.parse_target_atoms(
+                        target, int(plot_df["Atom"].max()), elements
+                    )
+                    plot_df = plot_df[plot_df["Atom"].isin(indices)].copy()
+            elif level == "element":
+                grouped = df.groupby("Element")["Bader_Charge"]
+                values = grouped.sum() if metric == "sum" else grouped.mean()
+                plot_df = pd.DataFrame({
+                    "Atom": values.index.astype(str),
+                    "Element": values.index.astype(str),
+                    "Bader_Charge": values.values.astype(float),
+                })
+            elif level == "fragment":
+                rows = []
+                for name, expression in fragments.get(workspace, {}).items():
+                    stats = ChargeCalculator.aggregate_charge(df, expression)
+                    rows.append({
+                        "Atom": str(name),
+                        "Element": "Fragment",
+                        "Bader_Charge": stats["sum"],
+                    })
+                plot_df = pd.DataFrame(
+                    rows, columns=["Atom", "Element", "Bader_Charge"]
+                )
+            else:
+                raise ValueError(f"未知绘图层级: {level}")
+            prepared[workspace] = {"df": plot_df, "struct": payload.get("struct")}
+        return prepared

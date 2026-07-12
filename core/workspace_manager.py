@@ -9,6 +9,7 @@ class WorkspaceManager:
     """Manages isolated workspaces for different analysis projects."""
 
     DEFAULT_GROUP = "\u672a\u5206\u7ec4"
+    CRITICAL_INPUT_FILES = {"ACF.dat", "POSCAR", "CONTCAR", "POTCAR"}
 
     def __init__(self, root_dir=None):
         self.root_dir = os.fspath(root_dir or default_workspace_root())
@@ -95,6 +96,8 @@ class WorkspaceManager:
         state.setdefault("group", self.DEFAULT_GROUP)
         state.setdefault("display_name", name)
         state.setdefault("order", 0)
+        state.setdefault("fragments_version", 1)
+        state.setdefault("fragments", {})
         return state
 
     def create_workspace(self, name):
@@ -193,11 +196,13 @@ class WorkspaceManager:
             ]
         return sorted_groups
 
-    def import_file(self, workspace_name, source_filepath):
-        """Copies a file into the workspace."""
+    def import_file(self, workspace_name, source_filepath, overwrite=False, destination_name=None):
+        """Copy a file into a workspace, requiring explicit overwrite consent."""
         ws_path = self.get_workspace_path(workspace_name)
-        filename = os.path.basename(source_filepath)
+        filename = destination_name or os.path.basename(source_filepath)
         dest_path = os.path.join(ws_path, filename)
+        if os.path.exists(dest_path) and not overwrite:
+            raise FileExistsError(dest_path)
         shutil.copy2(source_filepath, dest_path)
 
         state = self.load_state(workspace_name)
@@ -206,3 +211,54 @@ class WorkspaceManager:
             self.save_state(workspace_name, state)
 
         return dest_path
+
+    def invalidate_results(self, workspace_name, changed_filename=None):
+        """Discard calculated results after a critical input file changes."""
+        if changed_filename not in self.CRITICAL_INPUT_FILES:
+            return False
+        results_path = os.path.join(self.get_workspace_path(workspace_name), "results.json")
+        if os.path.exists(results_path):
+            os.remove(results_path)
+        state = self.load_state(workspace_name)
+        state["calculated"] = False
+        self.save_state(workspace_name, state)
+        return True
+
+    def save_fragments(self, workspace_name, fragments):
+        """Persist validated named fragment definitions for a workspace."""
+        normalized = {}
+        for raw_name, raw_definition in (fragments or {}).items():
+            name = str(raw_name).strip()
+            if not name:
+                raise ValueError("片段名称不能为空")
+            definition = raw_definition if isinstance(raw_definition, dict) else {}
+            expression = str(definition.get("expression", "")).strip()
+            overrides = {
+                str(ws).strip(): str(expr).strip()
+                for ws, expr in (definition.get("overrides", {}) or {}).items()
+                if str(ws).strip() and str(expr).strip()
+            }
+            normalized[name] = {"expression": expression, "overrides": overrides}
+        state = self.load_state(workspace_name)
+        state["fragments_version"] = 1
+        state["fragments"] = normalized
+        self.save_state(workspace_name, state)
+        return normalized
+
+    def get_fragments(self, workspace_name):
+        state = self.load_state(workspace_name)
+        fragments = state.get("fragments", {})
+        legacy = str(state.get("fragment", "")).strip()
+        if not fragments and legacy and not state.get("fragment_migrated"):
+            fragments = {
+                "默认片段": {"expression": legacy, "overrides": {}}
+            }
+            state["fragments"] = fragments
+            state["fragment_migrated"] = True
+            self.save_state(workspace_name, state)
+        return fragments if isinstance(fragments, dict) else {}
+
+    def resolve_fragment_expression(self, workspace_name, fragment_name):
+        definition = self.get_fragments(workspace_name).get(fragment_name, {})
+        overrides = definition.get("overrides", {}) or {}
+        return str(overrides.get(workspace_name, definition.get("expression", ""))).strip()
