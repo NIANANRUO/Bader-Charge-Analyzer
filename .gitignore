@@ -23,6 +23,7 @@ env/
 .vscode/
 .idea/
 .workbuddy/
+.worktrees/
 
 # Local runtime data
 workspaces/
