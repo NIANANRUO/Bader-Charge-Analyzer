@@ -12,8 +12,11 @@ class SelectionResolver:
     """Resolve atom IDs, inclusive ranges, and element symbols."""
 
     @staticmethod
-    def resolve(expression, elements) -> tuple[int, ...]:
-        total_atoms = len(elements)
+    def resolve(expression, elements, total_atoms=None) -> tuple[int, ...]:
+        elements = tuple(elements)
+        if total_atoms is None:
+            total_atoms = len(elements)
+        available_elements = elements[:total_atoms]
         expression = expression or ""
 
         if not expression.strip():
@@ -22,7 +25,7 @@ class SelectionResolver:
             return tuple(range(1, total_atoms + 1))
 
         selected = set()
-        known_elements = set(elements)
+        known_elements = set(available_elements)
         tokens = [token for token in re.split(r"[,\s]+", expression.strip()) if token]
 
         for token in tokens:
@@ -47,7 +50,7 @@ class SelectionResolver:
                 raise SelectionError(f"未知元素：{token}")
             selected.update(
                 atom_id
-                for atom_id, element in enumerate(elements, start=1)
+                for atom_id, element in enumerate(available_elements, start=1)
                 if element == token
             )
 

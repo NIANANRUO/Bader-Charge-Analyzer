@@ -14,6 +14,10 @@ def test_mixed_atom_ranges_and_elements_returns_unique_sorted_ids():
     assert SelectionResolver.resolve("4, 2-3, O", ELEMENTS) == (2, 3, 4)
 
 
+def test_explicit_total_atoms_limits_element_positions():
+    assert SelectionResolver.resolve("H", ["H", "H", "H"], total_atoms=2) == (1, 2)
+
+
 def test_empty_match_raises_selection_error():
     with pytest.raises(SelectionError, match="未匹配任何原子"):
         SelectionResolver.resolve("", [])

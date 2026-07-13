@@ -20,6 +20,16 @@ def test_parse_target_atoms_supports_mixed_ranges_atoms_and_elements():
     assert indices == [1, 2, 3, 4]
 
 
+def test_parse_target_atoms_empty_expression_uses_authoritative_total_atoms():
+    indices = ChargeCalculator.parse_target_atoms("", 5, ["H", "H", "H"])
+    assert indices == [1, 2, 3, 4, 5]
+
+
+def test_parse_target_atoms_numeric_id_uses_authoritative_total_atoms():
+    indices = ChargeCalculator.parse_target_atoms("5", 5, ["H", "H", "H"])
+    assert indices == [5]
+
+
 @pytest.mark.parametrize(
     ("expression", "message"),
     [

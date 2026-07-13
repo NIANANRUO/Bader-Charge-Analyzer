@@ -99,9 +99,7 @@ class ChargeCalculator:
         """
         Parses a target string (e.g., "1-5, 8", "O, Fe") into a list of atom indices to keep.
         """
-        if total_atoms != len(elements):
-            elements = elements[:total_atoms]
-        return list(SelectionResolver.resolve(target_str, elements))
+        return list(SelectionResolver.resolve(target_str, elements, total_atoms))
 
     @staticmethod
     def calculate_custom_sum(df, target_str, elements):
