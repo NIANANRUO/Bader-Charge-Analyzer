@@ -92,7 +92,7 @@ c:\Users\21483\.conda\envs\lis_sac_ml\python.exe
 
 ```text
 dist/BaderChargeAnalyzer/BaderChargeAnalyzer.exe
-dist/BaderChargeAnalyzer_Setup_v0.1.1.exe
+dist/BaderChargeAnalyzer_Setup_v0.1.2.exe
 ```
 
 安装器支持用户自定义安装位置。安装包不会包含本机已经加载的 `workspaces/`、分组配置、测试缓存或开发目录。安装后的用户工作区会写入用户本地数据目录，不会写入程序安装目录。

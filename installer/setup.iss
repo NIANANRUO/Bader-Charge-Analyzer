@@ -3,7 +3,7 @@
 ; Output: dist/BaderChargeAnalyzer_Setup_v<version>.exe
 
 #define AppName       "Bader Charge Analyzer"
-#define AppVersion    "0.1.1"
+#define AppVersion    "0.1.2"
 #define AppPublisher  "NIANANRUO"
 #define AppURL        "https://github.com/NIANANRUO/Bader-Charge-Analyzer"
 #define AppExeName    "BaderChargeAnalyzer.exe"
