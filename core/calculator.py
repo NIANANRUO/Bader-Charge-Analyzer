@@ -3,9 +3,10 @@ import pandas as pd
 import numpy as np
 import re
 
+from core.selection import SelectionError, SelectionResolver
 
-class TargetSelectionError(ValueError):
-    """Raised when an atom-selection expression cannot be resolved safely."""
+
+TargetSelectionError = SelectionError
 
 
 class ChargeCalculator:
@@ -98,39 +99,9 @@ class ChargeCalculator:
         """
         Parses a target string (e.g., "1-5, 8", "O, Fe") into a list of atom indices to keep.
         """
-        if not target_str.strip():
-            return list(range(1, total_atoms + 1))
-            
-        target_indices = set()
-        known_elements = set(elements)
-        parts = [p.strip() for p in re.split(r'[,\s]+', target_str) if p.strip()]
-        
-        for part in parts:
-            if re.match(r'^\d+(-\d+)?$', part):
-                if '-' in part:
-                    start, end = map(int, part.split('-'))
-                    if start > end:
-                        raise TargetSelectionError(f"原子范围不能倒序: {part}")
-                    if start < 1 or end > total_atoms:
-                        raise TargetSelectionError(f"原子编号超出有效范围 1-{total_atoms}: {part}")
-                    target_indices.update(range(start, end + 1))
-                else:
-                    atom_index = int(part)
-                    if atom_index < 1 or atom_index > total_atoms:
-                        raise TargetSelectionError(
-                            f"原子编号超出有效范围 1-{total_atoms}: {part}"
-                        )
-                    target_indices.add(atom_index)
-            else:
-                if part not in known_elements:
-                    raise TargetSelectionError(f"未知元素: {part}")
-                for i, el in enumerate(elements, start=1):
-                    if el == part:
-                        target_indices.add(i)
-
-        if not target_indices:
-            raise TargetSelectionError(f"表达式未匹配任何原子: {target_str}")
-        return sorted(list(target_indices))
+        if total_atoms != len(elements):
+            elements = elements[:total_atoms]
+        return list(SelectionResolver.resolve(target_str, elements))
 
     @staticmethod
     def calculate_custom_sum(df, target_str, elements):
