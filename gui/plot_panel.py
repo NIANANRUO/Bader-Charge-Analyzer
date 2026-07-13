@@ -23,6 +23,7 @@ import qtawesome as qta
 
 from gui.plot_config import PlotConfig
 from gui.components.collapsible import CollapsiblePanel
+from core.calculator import ChargeCalculator, TargetSelectionError
 
 # ── CJK font support for matplotlib ──
 # Must be configured BEFORE any Figure/Canvas creation so the initial
@@ -99,6 +100,9 @@ class PlotPanel(QWidget):
         super().__init__(parent)
         self._is_dark_mode = False
         self.current_data = {}
+        self._raw_data = {}
+        self._target_expression = ""
+        self._fragments_by_workspace = {}
         self._fragment_text = ""
         self.config = PlotConfig()
         self._draggable_annotations = []
@@ -180,6 +184,16 @@ class PlotPanel(QWidget):
         self.btn_ws_select.setToolTip("选择哪些体系参与绘图（点击弹出选择框）")
         self.btn_ws_select.clicked.connect(self._pick_plot_workspaces)
         lay_ct.addWidget(self.btn_ws_select, 4, 1)
+        lay_ct.addWidget(QLabel("数据层级:"), 4, 2)
+        self.cb_data_level = QComboBox()
+        self.cb_data_level.addItems(["原子", "片段", "元素"])
+        lay_ct.addWidget(self.cb_data_level, 4, 3)
+        lay_ct.addWidget(QLabel("元素统计:"), 5, 2)
+        self.cb_element_metric = QComboBox()
+        self.cb_element_metric.addItems(["总和", "平均值"])
+        lay_ct.addWidget(self.cb_element_metric, 5, 3)
+        self.cb_data_level.currentTextChanged.connect(self._rebuild_level_data)
+        self.cb_element_metric.currentTextChanged.connect(self._rebuild_level_data)
         self._ws_all = []          # all workspace names from data
         self._ws_selected = None   # None = all selected; set of names otherwise
         self._chart_ws_single = None  # single workspace selected from toolbar dropdown
@@ -1597,6 +1611,8 @@ class PlotPanel(QWidget):
         add_row(lay_data_filter, 0, "过滤 |q| < :", self.spin_filter, 2)
         add_row(lay_data_filter, 1, "显示前 N 个:", self.spin_top_n, 2)
         add_row(lay_data_filter, 2, "绘图体系:", self.btn_ws_select)
+        add_row(lay_data_filter, 2, "数据层级:", self.cb_data_level, 2)
+        add_row(lay_data_filter, 3, "元素统计:", self.cb_element_metric, 2)
         lay_data_filter.setColumnStretch(4, 1)
 
         tab_layout_title, lay_layout_title = make_grid_tab()
@@ -2928,11 +2944,43 @@ class PlotPanel(QWidget):
     #  Data entry point
     # ==================================================================
 
-    def plot_data(self, data_dict):
-        self._original_data = dict(data_dict)
-        self.current_data = dict(data_dict)
+    def plot_data(self, data_dict, target=None, fragments=None):
+        if target is not None:
+            self._target_expression = (target or "").strip()
+        if fragments is not None:
+            self._fragments_by_workspace = fragments or {}
+        self._raw_data = dict(data_dict)
+        self._set_prepared_plot_data()
+
+    def set_analysis_context(self, target="", fragments=None):
+        self._target_expression = (target or "").strip()
+        self._fragments_by_workspace = fragments or {}
+        if self._raw_data:
+            self._rebuild_level_data()
+
+    def _rebuild_level_data(self, *_args):
+        if self._raw_data:
+            self._set_prepared_plot_data()
+
+    def _set_prepared_plot_data(self):
+        level_map = {"原子": "atom", "片段": "fragment", "元素": "element"}
+        level = level_map.get(self.cb_data_level.currentText(), "atom")
+        metric = "mean" if self.cb_element_metric.currentText() == "平均值" else "sum"
+        try:
+            prepared = ChargeCalculator.prepare_plot_data(
+                self._raw_data,
+                level=level,
+                metric=metric,
+                fragments=self._fragments_by_workspace,
+                target=self._target_expression,
+            )
+        except TargetSelectionError as exc:
+            QMessageBox.warning(self, "绘图筛选错误", str(exc))
+            prepared = {}
+        self._original_data = dict(prepared)
+        self.current_data = dict(prepared)
         # Update workspace selection list
-        self._ws_all = list(data_dict.keys())
+        self._ws_all = list(prepared.keys())
         # Reset selection if previously selected workspaces no longer exist
         if self._ws_selected is not None:
             self._ws_selected = self._ws_selected & set(self._ws_all)

@@ -52,6 +52,51 @@ python main.py
 pytest
 ```
 
+## 构建 Windows 安装包
+
+项目使用与 DBand Studio 相同的发布链路：先用 PyInstaller 生成目录版程序，再用 Inno Setup 封装安装器。
+
+准备条件：
+
+- 安装 Inno Setup 6，并确保 `ISCC.exe` 可用。
+- 使用包含完整依赖的 Python 环境，例如：
+
+```powershell
+c:\Users\21483\.conda\envs\lis_sac_ml\python.exe
+```
+
+- 可选：准备 Windows 版 `bader.exe`。
+
+源码仓库不上传 `bader` 或 `bader.exe`。如果安装包不包含 Windows 可执行的 `bader.exe`，用户仍可导入已有 `ACF.dat`、`CONTCAR`、`POTCAR` 等文件进行解析、统计和可视化；只是不能在缺少 `ACF.dat` 时由程序自动调用 Bader 生成结果。
+
+构建不内置 Bader 的安装包：
+
+```powershell
+.\installer\build_windows.ps1
+```
+
+构建并内置 Windows 版 Bader：
+
+```powershell
+.\installer\build_windows.ps1 -BaderExe C:\path\to\bader.exe
+```
+
+如果 Inno Setup 没有加入 `PATH`，可以显式指定：
+
+```powershell
+.\installer\build_windows.ps1 `
+  -ISCCPath "C:\Users\21483\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
+```
+
+构建产物：
+
+```text
+dist/BaderChargeAnalyzer/BaderChargeAnalyzer.exe
+dist/BaderChargeAnalyzer_Setup_v0.1.1.exe
+```
+
+安装器支持用户自定义安装位置。安装包不会包含本机已经加载的 `workspaces/`、分组配置、测试缓存或开发目录。安装后的用户工作区会写入用户本地数据目录，不会写入程序安装目录。
+
 ## 项目结构
 
 ```text

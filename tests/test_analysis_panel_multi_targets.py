@@ -43,3 +43,19 @@ def test_multi_workspace_target_table_hides_for_single_workspace():
 
     assert panel.target_table.isVisibleTo(panel) is False
     assert panel.btn_apply_target_to_all.isVisibleTo(panel) is False
+
+
+def test_named_fragments_are_emitted_with_analysis_config():
+    app()
+    panel = AnalysisPanel()
+    emitted = []
+    panel.request_calculation.connect(emitted.append)
+
+    panel.add_fragment_row("吸附物", "1-3")
+    panel.add_fragment_row("表面", "4-8")
+    panel.emit_calculation()
+
+    assert emitted[0]["fragments"] == {
+        "吸附物": {"expression": "1-3", "overrides": {}},
+        "表面": {"expression": "4-8", "overrides": {}},
+    }

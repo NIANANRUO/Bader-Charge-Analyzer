@@ -181,3 +181,38 @@ def test_drop_event_emits_selected_workspace_names_not_group_headers(tmp_path):
         assert emitted == [(["ws1"], "Li2S6")]
     finally:
         window.close()
+
+
+def test_highlight_does_not_select_workspace_for_batch_plot(tmp_path):
+    app()
+    window, manager = build_window(tmp_path)
+    try:
+        manager.create_workspace("ws1")
+        manager.create_workspace("ws2")
+        window.load_workspaces()
+
+        item = find_workspace_item(window, "ws1")
+        window.ws_tree.setCurrentItem(item)
+        item.setSelected(True)
+
+        assert window.get_selected_workspace_names() == []
+    finally:
+        window.close()
+
+
+def test_workspace_checkboxes_are_the_only_batch_selection_source(tmp_path):
+    app()
+    window, manager = build_window(tmp_path)
+    try:
+        manager.create_workspace("ws1")
+        manager.create_workspace("ws2")
+        window.load_workspaces()
+
+        ws1 = find_workspace_item(window, "ws1")
+        ws2 = find_workspace_item(window, "ws2")
+        ws1.setCheckState(0, main_window.Qt.Checked)
+        ws2.setSelected(True)
+
+        assert window.get_selected_workspace_names() == ["ws1"]
+    finally:
+        window.close()

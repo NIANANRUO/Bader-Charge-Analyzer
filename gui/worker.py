@@ -110,13 +110,6 @@ class AnalysisWorker(QThread):
             self.progress.emit("计算净电荷...")
             full_df = ChargeCalculator.calculate_net_charges(acf_df, zval_map, elements)
             
-            # 5. Apply Target Filters
-            target_str = self.setup_config.get("target", "")
-            if target_str:
-                self.progress.emit("提取目标原子...")
-                target_indices = ChargeCalculator.parse_target_atoms(target_str, len(elements), elements)
-                full_df = full_df[full_df['Atom'].isin(target_indices)]
-                
             self.progress.emit("分析完成！")
             self.finished.emit(struct, full_df, None)
             

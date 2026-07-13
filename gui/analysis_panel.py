@@ -12,6 +12,7 @@ class AnalysisPanel(QWidget):
     request_calculation = Signal(dict)
     request_export_csv = Signal()
     request_export_image = Signal()
+    request_export_fragments = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,7 +87,35 @@ class AnalysisPanel(QWidget):
         grp_target.addWidget(QLabel("片段求和："))
         self.line_fragment = QLineEdit()
         self.line_fragment.setPlaceholderText("例如 1-15")
-        grp_target.addWidget(self.line_fragment)
+        self.line_fragment.setVisible(False)
+        self.fragment_table = QTableWidget()
+        self.fragment_table.setColumnCount(2)
+        self.fragment_table.setHorizontalHeaderLabels(["片段名称", "默认原子表达式"])
+        self.fragment_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.fragment_table.verticalHeader().setVisible(False)
+        self.fragment_table.setMaximumHeight(180)
+        grp_target.addWidget(self.fragment_table)
+        fragment_actions = QHBoxLayout()
+        self.btn_add_fragment = QPushButton("新增片段")
+        self.btn_remove_fragment = QPushButton("删除片段")
+        self.btn_add_fragment.clicked.connect(lambda: self.add_fragment_row())
+        self.btn_remove_fragment.clicked.connect(self.remove_selected_fragment)
+        fragment_actions.addWidget(self.btn_add_fragment)
+        fragment_actions.addWidget(self.btn_remove_fragment)
+        grp_target.addLayout(fragment_actions)
+        self.fragment_results = QTableWidget()
+        self.fragment_results.setColumnCount(8)
+        self.fragment_results.setHorizontalHeaderLabels(
+            ["工作区", "片段", "表达式", "原子数", "总和(e)",
+             "平均值(e)", "最大值(e)", "最小值(e)"]
+        )
+        self.fragment_results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.fragment_results.verticalHeader().setVisible(False)
+        self.fragment_results.setMaximumHeight(190)
+        grp_target.addWidget(self.fragment_results)
+        self.btn_export_fragments = QPushButton("导出片段统计")
+        self.btn_export_fragments.clicked.connect(self.request_export_fragments.emit)
+        grp_target.addWidget(self.btn_export_fragments)
         layout.addWidget(grp_target)
         
         # 4. Compute
@@ -153,13 +182,21 @@ class AnalysisPanel(QWidget):
             
         self.lbl_file_status.setText("<br>".join(status_lines))
 
-    def update_summary(self, target_str, total_charge, max_gain_str, max_loss_str):
+    def update_summary(self, target_str, total_charge, max_gain_str, max_loss_str, stats=None):
         html = f"""
         <table width='100%' style='margin-top:5px; color:#555;'>
             <tr><td><b>目标原子：</b></td><td align='right'>{target_str or '全部'}</td></tr>
         """
         if total_charge is not None:
             html += f"<tr><td><b>总和：</b></td><td align='right'>{total_charge:.3f} e</td></tr>"
+        if stats:
+            html += (
+                f"<tr><td><b>原子数：</b></td><td align='right'>{stats['count']}</td></tr>"
+                f"<tr><td><b>平均值：</b></td><td align='right'>{stats['mean']:.3f} e</td></tr>"
+                f"<tr><td><b>标准差：</b></td><td align='right'>{stats['std']:.3f} e</td></tr>"
+                f"<tr><td><b>最大值：</b></td><td align='right'>{stats['max']:.3f} e</td></tr>"
+                f"<tr><td><b>最小值：</b></td><td align='right'>{stats['min']:.3f} e</td></tr>"
+            )
             
         html += f"""
             <tr><td><b>最大增益：</b></td><td align='right' style='color:#198754;'>{max_gain_str}</td></tr>
@@ -175,6 +212,7 @@ class AnalysisPanel(QWidget):
             "zval": {"mode": "auto" if self.rad_auto.isChecked() else "manual", "manual_str": self.txt_manual_zval.text().strip()},
             "target": self.line_target.text().strip(),
             "fragment": self.line_fragment.text().strip(),
+            "fragments": self.get_fragments(),
             "targets_by_workspace": self._targets_by_workspace(),
         }
         self.request_calculation.emit(config)
@@ -189,6 +227,7 @@ class AnalysisPanel(QWidget):
         self.target_table.setRowCount(len(self._selected_workspaces) if multi else 0)
 
         if not multi:
+            self._rebuild_fragment_columns()
             return
 
         default_target = self.line_target.text().strip()
@@ -199,6 +238,74 @@ class AnalysisPanel(QWidget):
             self.target_table.setItem(
                 row, 1, QTableWidgetItem(current_targets.get(name, default_target))
             )
+        self._rebuild_fragment_columns()
+
+    def add_fragment_row(self, name="", expression=""):
+        row = self.fragment_table.rowCount()
+        self.fragment_table.insertRow(row)
+        self.fragment_table.setItem(row, 0, QTableWidgetItem(name))
+        self.fragment_table.setItem(row, 1, QTableWidgetItem(expression))
+        for column in range(2, self.fragment_table.columnCount()):
+            self.fragment_table.setItem(row, column, QTableWidgetItem(""))
+
+    def remove_selected_fragment(self):
+        rows = sorted(
+            {index.row() for index in self.fragment_table.selectedIndexes()},
+            reverse=True,
+        )
+        for row in rows:
+            self.fragment_table.removeRow(row)
+
+    def get_fragments(self):
+        fragments = {}
+        for row in range(self.fragment_table.rowCount()):
+            name_item = self.fragment_table.item(row, 0)
+            expression_item = self.fragment_table.item(row, 1)
+            name = name_item.text().strip() if name_item else ""
+            expression = expression_item.text().strip() if expression_item else ""
+            if not name:
+                continue
+            overrides = {}
+            for column, workspace in enumerate(self._selected_workspaces, start=2):
+                item = self.fragment_table.item(row, column)
+                value = item.text().strip() if item else ""
+                if value:
+                    overrides[workspace] = value
+            fragments[name] = {"expression": expression, "overrides": overrides}
+        return fragments
+
+    def set_fragments(self, fragments):
+        self.fragment_table.setRowCount(0)
+        for name, definition in (fragments or {}).items():
+            self.add_fragment_row(name, definition.get("expression", ""))
+            row = self.fragment_table.rowCount() - 1
+            overrides = definition.get("overrides", {}) or {}
+            for column, workspace in enumerate(self._selected_workspaces, start=2):
+                self.fragment_table.setItem(
+                    row, column, QTableWidgetItem(overrides.get(workspace, ""))
+                )
+
+    def _rebuild_fragment_columns(self):
+        existing = self.get_fragments()
+        self.fragment_table.setColumnCount(2 + len(self._selected_workspaces))
+        self.fragment_table.setHorizontalHeaderLabels(
+            ["片段名称", "默认原子表达式"] + self._selected_workspaces
+        )
+        self.set_fragments(existing)
+
+    def update_fragment_results(self, rows):
+        self.fragment_results.setRowCount(len(rows))
+        for row_index, result in enumerate(rows):
+            values = [
+                result["workspace"], result["fragment"], result["expression"],
+                str(result["count"]), f'{result["sum"]:.6f}',
+                f'{result["mean"]:.6f}', f'{result["max"]:.6f}',
+                f'{result["min"]:.6f}',
+            ]
+            for column, value in enumerate(values):
+                self.fragment_results.setItem(
+                    row_index, column, QTableWidgetItem(value)
+                )
 
     def _apply_target_to_selected(self):
         target = self.line_target.text().strip()
