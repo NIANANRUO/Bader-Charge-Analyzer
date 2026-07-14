@@ -219,6 +219,21 @@ def test_workspace_checkboxes_are_the_only_batch_selection_source(tmp_path):
         window.close()
 
 
+def test_workspace_selection_change_marks_3d_geometry_dirty(tmp_path):
+    app()
+    window, manager = build_window(tmp_path)
+    try:
+        manager.create_workspace("ws1")
+        window.load_workspaces()
+        window._3d_dirty = False
+
+        find_workspace_item(window, "ws1").setCheckState(0, main_window.Qt.Checked)
+
+        assert window._3d_dirty is True
+    finally:
+        window.close()
+
+
 def test_saved_fragment_definitions_persist_and_refresh_results(tmp_path):
     app()
     window, manager = build_window(tmp_path)

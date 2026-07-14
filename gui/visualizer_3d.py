@@ -33,6 +33,7 @@ def _pick_log_msg(msg: str) -> None:
 from core.bond_detector import BondDetector
 from core.structure_model import Structure3D
 from rendering.pyvista_structure_renderer import PyVistaStructureRenderer, RenderSettings
+from rendering.scene_cache import AppearanceKey, GeometryKey, SceneCache
 
 
 class _MouseEventFilter(QObject):
@@ -645,6 +646,26 @@ class Visualizer3D(QWidget):
         self.reset_camera()
         self._install_picking()
 
+    def set_analysis_selection(self, selected_atom_ids):
+        """Set the authoritative committed scope without scheduling a render."""
+        ids = tuple(sorted(int(atom_id) for atom_id in selected_atom_ids))
+        self.render_settings["target_str"] = ",".join(map(str, ids))
+        self._is_isolated = False
+
+    def update_appearance(self, df, selected_atom_ids):
+        """Refresh charges and committed-scope coloring without rebuilding geometry."""
+        if self._is_closing or self.structure_model is None:
+            return
+        self.df = df
+        self.set_analysis_selection(selected_atom_ids)
+        self.structure_model = self.structure_model.with_charges(df)
+        if df is not None:
+            self.chg_dict = dict(zip(df["Atom"].values, df["Bader_Charge"].values))
+            self.charge_dict = dict(zip(df["Atom"].values, df["CHARGE"].values))
+            self.zval_dict = dict(zip(df["Atom"].values, df["ZVAL"].values))
+        self.renderer.update_appearance(self.structure_model, self._render_settings())
+        self._highlight_actor = self.renderer._highlight_actor
+
     def set_render_state(
         self,
         hide_bg,
@@ -668,7 +689,8 @@ class Visualizer3D(QWidget):
     ):
         if self._is_closing:
             return
-        incoming_target = target_str or ""
+        previous = dict(self.render_settings)
+        incoming_target = self.render_settings.get("target_str", "") if target_str is None else (target_str or "")
         if self._is_isolated and not incoming_target and self.render_settings.get("target_str"):
             incoming_target = self.render_settings["target_str"]
         else:
@@ -696,7 +718,23 @@ class Visualizer3D(QWidget):
                 "custom_colors": custom_colors,
             }
         )
-        self._schedule_render()
+        if self.structure_model is None or self.render_settings == previous:
+            return
+        geometry_fields = {
+            "show_bonds",
+            "sphere_scale",
+            "bond_radius",
+            "show_cell",
+            "show_axes_flag",
+            "representation",
+        }
+        if any(previous.get(key) != self.render_settings.get(key) for key in geometry_fields):
+            self._schedule_render()
+        else:
+            self.renderer.update_appearance(
+                self.structure_model, self._render_settings()
+            )
+            self._highlight_actor = self.renderer._highlight_actor
 
     def render_scene(self):
         if self._is_closing:
@@ -709,12 +747,18 @@ class Visualizer3D(QWidget):
             self.plotter.enable_lightkit()
             self._lightkit_enabled = True
 
+        settings = self._render_settings()
+        self.renderer.render(self.structure_model, settings)
+        self._highlight_actor = self.renderer._highlight_actor
+        self._restore_ground_grid()
+
+    def _render_settings(self):
         rs = self.render_settings
         sphere_scale = rs["sphere_scale"] / 100.0
         background_opacity = 1.0 - (rs["transparency"] / 100.0) if rs["hide_bg"] else 1.0
         selected_atom_id = self.selected_atom_idx + 1 if self.selected_atom_idx >= 0 else None
 
-        settings = RenderSettings(
+        return RenderSettings(
             show_bonds=rs["show_bonds"],
             show_cell=rs.get("show_cell", True),
             show_axes=rs.get("show_axes_flag", True),
@@ -735,9 +779,6 @@ class Visualizer3D(QWidget):
             label_atom_ids=self._parse_target_str(rs.get("label_target_str", "")),
             custom_colors=rs.get("custom_colors"),
         )
-        self.renderer.render(self.structure_model, settings)
-        self._highlight_actor = self.renderer._highlight_actor
-        self._restore_ground_grid()
 
     def _schedule_render(self, delay_ms: int | None = None) -> None:
         """Coalesce multiple render requests into one via a short timer.
@@ -964,6 +1005,7 @@ class MultiVisualizer3DPanel(QWidget):
         self._load_timer_active = False
         self._load_generation = 0
         self._is_closing = False
+        self._scene_cache = SceneCache(capacity=6, release=self._release_cached_tile)
 
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
@@ -983,21 +1025,34 @@ class MultiVisualizer3DPanel(QWidget):
         self._load_timer_active = False
         self._load_generation += 1
 
-        for name in list(self.tiles):
-            if name not in keep:
-                tile = self.tiles.pop(name)
+        # Tiles whose progressive geometry load never ran are not cache
+        # entries and must not accumulate when selection changes quickly.
+        for name, tile in list(self.tiles.items()):
+            if name not in keep and tile.get("geometry_key") is None:
+                self.tiles.pop(name, None)
                 self._cleanup_tile(tile)
                 tile["frame"].setParent(None)
                 tile["frame"].deleteLater()
+        self._scene_cache.set_visible(keep)
+        if self.maximized_workspace not in keep:
+            self.maximized_workspace = None
 
         for name in selected_names:
+            data = data_by_workspace.get(name) or {}
+            geometry_key = self._geometry_key(name, data)
+            if name in self.tiles and self.tiles[name].get("geometry_key") != geometry_key:
+                self._scene_cache.invalidate_workspace(name)
             if name not in self.tiles:
                 self.tiles[name] = self._create_tile(name)
-            data = data_by_workspace.get(name) or {}
-            data_key = self._data_key(data)
             tile = self.tiles[name]
-            if tile.get("data_key") != data_key:
-                self._pending_workspace_loads.append((name, data, data_key))
+            tile["data"] = data
+            appearance_key = self._appearance_key(data)
+            if tile.get("geometry_key") != geometry_key:
+                self._pending_workspace_loads.append(
+                    (name, data, geometry_key, appearance_key)
+                )
+            elif tile.get("appearance_key") != appearance_key:
+                self._update_tile_appearance(name, data, appearance_key)
 
         if selected_names:
             self.active_workspace = self.active_workspace if self.active_workspace in keep else selected_names[0]
@@ -1036,12 +1091,52 @@ class MultiVisualizer3DPanel(QWidget):
         )
         layout.addWidget(header)
         layout.addWidget(visualizer, 1)
-        return {"frame": frame, "visualizer": visualizer, "button": btn_max, "data_key": None}
+        return {
+            "frame": frame,
+            "visualizer": visualizer,
+            "button": btn_max,
+            "geometry_key": None,
+            "appearance_key": None,
+            "data": None,
+        }
 
-    def _data_key(self, data):
-        if not data:
-            return None
-        return (id(data.get("struct")), id(data.get("df")))
+    def _geometry_key(self, workspace, data):
+        struct = data.get("struct")
+        df = data.get("df")
+        atom_count = data.get("atom_count")
+        if atom_count is None:
+            try:
+                atom_count = len(struct)
+            except TypeError:
+                try:
+                    atom_count = len(df) if df is not None else 0
+                except TypeError:
+                    atom_count = 0
+        elements = data.get("element_sequence")
+        if elements is None and df is not None and hasattr(df, "columns") and "Element" in df.columns:
+            elements = tuple(df.sort_values("Atom")["Element"].astype(str))
+        if elements is None:
+            try:
+                elements = tuple(site.specie.symbol for site in struct)
+            except (TypeError, AttributeError):
+                elements = ()
+        fingerprint = data.get("structure_fingerprint") or data.get("structure_revision")
+        if not fingerprint:
+            fingerprint = f"memory:{id(struct)}"
+        return GeometryKey(workspace, str(fingerprint), int(atom_count), tuple(elements))
+
+    def _appearance_key(self, data):
+        settings = data.get("render_settings", self._last_settings or {})
+        frozen_settings = tuple(
+            sorted((str(key), repr(value)) for key, value in dict(settings).items())
+        )
+        return AppearanceKey(
+            int(data.get("analysis_revision", 0)),
+            tuple(int(value) for value in data.get("selected_atom_ids", ())),
+            str(data.get("source_revision", "")),
+            str(data.get("charge_revision", data.get("source_revision", ""))),
+            frozen_settings,
+        )
 
     def _start_progressive_loading(self):
         if not self._pending_workspace_loads:
@@ -1064,11 +1159,17 @@ class MultiVisualizer3DPanel(QWidget):
             self._load_timer_active = False
             return
 
-        name, data, data_key = self._pending_workspace_loads.pop(0)
+        name, data, geometry_key, appearance_key = self._pending_workspace_loads.pop(0)
         tile = self.tiles.get(name)
-        if tile is not None and tile.get("data_key") != data_key:
+        if tile is not None and tile.get("geometry_key") != geometry_key:
+            selected_ids = appearance_key.selected_atom_ids
+            if hasattr(tile["visualizer"], "set_analysis_selection"):
+                tile["visualizer"].set_analysis_selection(selected_ids)
             tile["visualizer"].load_data(data.get("struct"), data.get("df"))
-            tile["data_key"] = data_key
+            tile["geometry_key"] = geometry_key
+            tile["appearance_key"] = appearance_key
+            self._scene_cache.remember_geometry(geometry_key, tile)
+            self._scene_cache.remember_appearance(name, appearance_key)
             if self._last_settings:
                 self._apply_settings_to(tile["visualizer"], self._last_settings)
 
@@ -1078,6 +1179,36 @@ class MultiVisualizer3DPanel(QWidget):
             QTimer.singleShot(80, lambda: self._load_next_pending_workspace(active_generation))
         else:
             self._load_timer_active = False
+
+    def update_workspace_appearances(self, data_by_workspace, names=None):
+        """Apply committed scope/charge revisions to existing scenes only."""
+        complete = True
+        for name in list(names or data_by_workspace):
+            tile = self.tiles.get(name)
+            data = data_by_workspace.get(name) or {}
+            if tile is None or tile.get("geometry_key") != self._geometry_key(name, data):
+                complete = False
+                continue
+            appearance_key = self._appearance_key(data)
+            if tile.get("appearance_key") != appearance_key:
+                tile["data"] = data
+                self._update_tile_appearance(name, data, appearance_key)
+        return complete
+
+    def invalidate_workspace(self, workspace):
+        self._scene_cache.invalidate_workspace(workspace)
+        if self.active_workspace == workspace:
+            self.active_workspace = None
+        if self.maximized_workspace == workspace:
+            self.maximized_workspace = None
+
+    def _update_tile_appearance(self, name, data, appearance_key):
+        tile = self.tiles[name]
+        tile["visualizer"].update_appearance(
+            data.get("df"), appearance_key.selected_atom_ids
+        )
+        tile["appearance_key"] = appearance_key
+        self._scene_cache.remember_appearance(name, appearance_key)
 
     def _emit_atom_selected(self, workspace, data):
         self.active_workspace = workspace
@@ -1168,6 +1299,17 @@ class MultiVisualizer3DPanel(QWidget):
         except Exception:
             pass
 
+    def _release_cached_tile(self, tile):
+        for name, current in list(self.tiles.items()):
+            if current is tile:
+                self.tiles.pop(name, None)
+                break
+        self._cleanup_tile(tile)
+        frame = tile.get("frame") if tile else None
+        if frame is not None:
+            frame.setParent(None)
+            frame.deleteLater()
+
     def cleanup(self):
         """Stop pending 3D work and close child VTK render windows explicitly."""
         if self._is_closing:
@@ -1176,12 +1318,10 @@ class MultiVisualizer3DPanel(QWidget):
         self._load_generation += 1
         self._pending_workspace_loads = []
         self._load_timer_active = False
+        for name in list(self.tiles):
+            self._scene_cache.invalidate_workspace(name)
         for tile in list(self.tiles.values()):
-            self._cleanup_tile(tile)
-            frame = tile.get("frame")
-            if frame is not None:
-                frame.setParent(None)
-                frame.deleteLater()
+            self._release_cached_tile(tile)
         self.tiles.clear()
         self.active_workspace = None
         self.maximized_workspace = None

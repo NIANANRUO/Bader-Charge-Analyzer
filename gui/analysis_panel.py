@@ -706,7 +706,6 @@ class AnalysisPanel3D(QWidget):
             "show_bonds": self.chk_show_bonds.isChecked(),
             "show_cell": self.chk_show_cell.isChecked(),
             "show_axes": self.chk_show_axes.isChecked(),
-            "target_str": "",
             "label_target_str": self.line_label_target.text().strip(),
             "transparency": self.slider_trans.value(),
             "sphere_scale": self.slider_scale.value(),

@@ -795,7 +795,8 @@ class MainWindow(QMainWindow):
     def on_tab_changed(self, index):
         if index == 2:
             self._ensure_3d_loaded()
-            self._request_3d_sync(force=True)
+            if self._3d_dirty:
+                self._request_3d_sync(force=True)
         self.center_stack.setCurrentIndex(index)
         if index == 0 or index == 1:
             self.right_stack.setCurrentIndex(0)
@@ -1040,6 +1041,7 @@ class MainWindow(QMainWindow):
                 f"确定要删除工作区 '{ws_name}' 吗？\n此操作不可撤销。",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
+                self._discard_workspace_runtime(ws_name)
                 self.ws_mgr.delete_workspace(ws_name)
                 self.load_workspaces()
                 self.current_ws = None
@@ -1066,6 +1068,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 for ws in ws_names:
+                    self._discard_workspace_runtime(ws)
                     self.ws_mgr.delete_workspace(ws)
                 # Remove group from registry
                 groups = self.ws_mgr.get_groups()
@@ -1292,13 +1295,19 @@ class MainWindow(QMainWindow):
     def _invalidate_workspace_cache(self, workspace, filename):
         if not self.ws_mgr.invalidate_results(workspace, filename):
             return
-        self.all_calculated_data.pop(workspace, None)
-        self.session_store.remove(workspace)
+        self._discard_workspace_runtime(workspace)
         if workspace == self.current_ws:
             self.current_df = None
             self.tab_data.setRowCount(0)
             self.tab_multi_compare.setRowCount(0)
         self.plot_panel.plot_data(self._calculated_data_for_current_selection())
+
+    def _discard_workspace_runtime(self, workspace):
+        self.all_calculated_data.pop(workspace, None)
+        self.session_store.remove(workspace)
+        if self.visualizer_3d is not None:
+            self.visualizer_3d.invalidate_workspace(workspace)
+        self._3d_dirty = True
 
     def update_file_status(self):
         self.list_files.clear()
@@ -1643,9 +1652,23 @@ class MainWindow(QMainWindow):
         )
 
     def _request_3d_appearance_update(self, names):
-        """Task 8 will specialize this into a geometry-free appearance update."""
-        if self._has_3d:
-            self._request_3d_sync()
+        """Refresh committed target colors without rebuilding structure geometry."""
+        if not self._has_3d or self.visualizer_3d is None:
+            self._3d_dirty = True
+            return
+        if self.nav_tabs.currentIndex() != 2:
+            self._3d_dirty = True
+            return
+        payloads = {
+            name: payload
+            for name in names
+            if (payload := self._workspace_3d_payload(name)) is not None
+        }
+        complete = self.visualizer_3d.update_workspace_appearances(payloads, names)
+        if complete is False:
+            self._request_3d_sync(force=True)
+        else:
+            self._3d_dirty = False
 
     def _start_batch_analysis(self, names, config):
         batch_id = self._begin_analysis_generation("batch")
@@ -2308,9 +2331,7 @@ class MainWindow(QMainWindow):
         data_by_workspace = {}
         elements = set()
         for name in names:
-            data = self.all_calculated_data.get(name)
-            if data is None:
-                data = self._load_ws_data_from_disk(name)
+            data = self._workspace_3d_payload(name)
             if data is not None:
                 data_by_workspace[name] = data
                 df = data.get("df")
@@ -2320,6 +2341,31 @@ class MainWindow(QMainWindow):
         self.visualizer_3d.set_workspaces_data(data_by_workspace, names)
         if self.analysis_panel_3d is not None and elements:
             self.analysis_panel_3d.update_elements(elements)
+
+    def _workspace_3d_payload(self, name):
+        data = self.all_calculated_data.get(name)
+        if data is None:
+            data = self._load_ws_data_from_disk(name)
+        if data is None:
+            return None
+        try:
+            session = self.session_store.session(name)
+        except KeyError:
+            self._put_loaded_result(name, data)
+            session = self.session_store.session(name)
+        full_df = session.full_result
+        ordered = full_df.sort_values("Atom")
+        return {
+            "struct": session.structure if session.structure is not None else data.get("struct"),
+            "df": full_df,
+            "structure_fingerprint": session.structure_revision,
+            "atom_count": len(ordered),
+            "element_sequence": tuple(ordered["Element"].astype(str)),
+            "analysis_revision": session.analysis_revision,
+            "selected_atom_ids": session.selected_atom_ids,
+            "source_revision": session.source_revision,
+            "charge_revision": session.source_revision,
+        }
 
     def update_3d_render_settings(self, settings):
         if not self._has_3d:
@@ -2350,7 +2396,7 @@ class MainWindow(QMainWindow):
             hide_bg=settings["hide_bg"],
             show_labels=settings["show_labels"],
             show_bonds=settings["show_bonds"],
-            target_str=settings.get("target_str", ""),
+            target_str=settings.get("target_str"),
             label_target_str=settings.get("label_target_str", ""),
             trans=settings.get("transparency", 10),
             scale=settings.get("sphere_scale", 100),
