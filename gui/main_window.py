@@ -5,6 +5,7 @@ import math
 import re
 import json
 import numpy as np
+import pandas as pd
 import datetime
 import qtawesome as qta
 
@@ -23,6 +24,9 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, Signal
 
 from core.workspace_manager import WorkspaceManager
+from core.analysis_session import AnalysisSessionStore
+from core.selection import SelectionResolver
+from core.source_revision import SourceRevision
 from core.runtime_paths import bundled_bader_candidates
 from gui.analysis_panel import AnalysisPanel
 # Deferred (lazy) imports — these pull in heavy dependencies:
@@ -191,6 +195,9 @@ class MainWindow(QMainWindow):
         self._batch_errors = []
         self._batch_config = None
         self._batch_worker = None
+        self._batch_pending_results = {}
+        self._single_config = None
+        self.session_store = AnalysisSessionStore()
         self.all_calculated_data = {}
         self.current_df = None
 
@@ -490,14 +497,23 @@ class MainWindow(QMainWindow):
         self.right_stack.setFixedWidth(320)
 
         self.analysis_panel_plot = AnalysisPanel()
-        self.analysis_panel_plot.line_target.textChanged.connect(
-            self._on_target_filter_changed
+        self.analysis_panel_plot.draft_scope_changed.connect(
+            self._on_draft_scope_changed
         )
         self.analysis_panel_plot.request_calculation.connect(self.run_analysis)
         self.analysis_panel_plot.request_export_csv.connect(self.export_csv)
+        self.analysis_panel_plot.request_export_full_csv.connect(
+            self.export_full_csv
+        )
         self.analysis_panel_plot.request_export_image.connect(self.export_image)
         self.analysis_panel_plot.request_export_fragments.connect(
             self.export_fragment_results
+        )
+        self.analysis_panel_plot.workspace_targets_changed.connect(
+            self._on_workspace_targets_changed
+        )
+        self.analysis_panel_plot.fragments_changed.connect(
+            self._on_fragments_changed
         )
         self.right_stack.addWidget(self.analysis_panel_plot)
 
@@ -937,24 +953,43 @@ class MainWindow(QMainWindow):
             return
         self.selected_workspaces = self.get_selected_workspace_names()
         current_targets = {
-            name: self._workspace_targets.get(name, "")
+            name: self._workspace_targets[name]
             for name in self.selected_workspaces
+            if name in self._workspace_targets
         }
         if hasattr(self, "analysis_panel_plot"):
             self.analysis_panel_plot.set_selected_workspaces(
-                self.selected_workspaces, current_targets
+                self.selected_workspaces, current_targets, self.current_ws
+            )
+            fragment_workspace = (
+                self.selected_workspaces[0]
+                if self.selected_workspaces
+                else self.current_ws
+            )
+            self.analysis_panel_plot.set_fragments(
+                self.ws_mgr.get_fragments(fragment_workspace)
+                if fragment_workspace else {}
             )
         if self.plot_panel:
             # Push latest calculated data to plot panel so that Apply / chart
             # type change produce visible output (root-cause fix for stale
             # current_data after workspace activation).
-            _plot_data = self._calculated_data_for_current_selection()
-            if _plot_data:
+            session_names = self._session_names(self.selected_workspaces)
+            if session_names:
+                full_data = {
+                    name: {
+                        "df": self.session_store.full_df(name),
+                        "struct": self.session_store.session(name).structure,
+                    }
+                    for name in session_names
+                }
                 self.plot_panel.plot_data(
-                    _plot_data,
-                    target=self.analysis_panel_plot.line_target.text(),
+                    full_data,
+                    selected_by_workspace=self._selected_ids_by_workspace(
+                        session_names
+                    ),
                     fragments=self._fragment_expressions_for_workspaces(
-                        list(_plot_data.keys()),
+                        session_names,
                         self.analysis_panel_plot.get_fragments(),
                     ),
                 )
@@ -1124,15 +1159,19 @@ class MainWindow(QMainWindow):
             self.data_table_subtab.setCurrentIndex(0)
 
         if self.current_ws in self.all_calculated_data:
-            data = self.all_calculated_data[self.current_ws]
-            self.current_df = data["df"]
+            try:
+                self.current_df = self.session_store.projected_df(self.current_ws)
+            except KeyError:
+                data = self.all_calculated_data[self.current_ws]
+                self._put_loaded_result(self.current_ws, data)
+                self.current_df = self.session_store.projected_df(self.current_ws)
             self.update_table_view(self.current_df)
             if self._has_3d:
                 self._request_3d_sync()
         else:
             data = self._load_ws_data_from_disk(self.current_ws)
             if data is not None:
-                self.current_df = data["df"]
+                self.current_df = self.session_store.projected_df(self.current_ws)
                 self.update_table_view(self.current_df)
                 if self._has_3d:
                     self._request_3d_sync()
@@ -1245,6 +1284,7 @@ class MainWindow(QMainWindow):
         if not self.ws_mgr.invalidate_results(workspace, filename):
             return
         self.all_calculated_data.pop(workspace, None)
+        self.session_store._sessions.pop(workspace, None)
         if workspace == self.current_ws:
             self.current_df = None
             self.tab_data.setRowCount(0)
@@ -1300,6 +1340,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_ws = names[0]
+        self._single_config = dict(config)
         ws_path = self.ws_mgr.get_workspace_path(self.current_ws)
         bader_exe = self._find_bader_executable()
 
@@ -1331,6 +1372,52 @@ class MainWindow(QMainWindow):
         for name in self.get_selected_workspace_names():
             self._workspace_targets[name] = targets.get(name, default_target)
 
+    def _on_workspace_targets_changed(self, targets):
+        self._workspace_targets.update(dict(targets or {}))
+        for workspace, expression in dict(targets or {}).items():
+            try:
+                self.session_store.set_draft(workspace, expression)
+            except KeyError:
+                pass
+
+    def _on_draft_scope_changed(self, expression):
+        """Record editable scope text without changing any visible projection."""
+        names = self.selected_workspaces or (
+            [self.current_ws] if self.current_ws else []
+        )
+        for workspace in names:
+            self._workspace_targets[workspace] = str(expression or "").strip()
+            try:
+                self.session_store.set_draft(workspace, expression)
+            except KeyError:
+                pass
+
+    def _on_fragments_changed(self, fragments, workspaces):
+        names = list(workspaces or [])
+        if not names and self.current_ws:
+            names = [self.current_ws]
+        for name in names:
+            self.ws_mgr.save_fragments(name, fragments)
+
+        self.analysis_panel_plot.set_fragments(fragments)
+        missing = []
+        for name in names:
+            data = self.all_calculated_data.get(name)
+            if data is None:
+                data = self._load_ws_data_from_disk(name)
+            if not data or data.get("df") is None:
+                missing.append(name)
+
+        self._refresh_fragment_results()
+        self.refresh_workspace_selection_context()
+        if missing:
+            QMessageBox.information(
+                self,
+                "需要重新分析",
+                "以下工作区尚无完整分析结果，片段统计将在分析后生成：\n"
+                + "\n".join(missing),
+            )
+
     def _fragment_expressions_for_workspaces(self, workspaces, fragments=None):
         definitions = fragments or {}
         result = {}
@@ -1352,10 +1439,14 @@ class MainWindow(QMainWindow):
         names = self.selected_workspaces or ([self.current_ws] if self.current_ws else [])
         rows = []
         for workspace in names:
-            data = self.all_calculated_data.get(workspace)
-            if data is None:
-                data = self._load_ws_data_from_disk(workspace)
-            if not data or data.get("df") is None:
+            try:
+                full_df = self.session_store.full_df(workspace)
+            except KeyError:
+                data = self.all_calculated_data.get(workspace)
+                if data is None:
+                    data = self._load_ws_data_from_disk(workspace)
+                full_df = data.get("df") if data else None
+            if full_df is None:
                 continue
             definitions = self.ws_mgr.get_fragments(workspace)
             expressions = self._fragment_expressions_for_workspaces(
@@ -1363,7 +1454,7 @@ class MainWindow(QMainWindow):
             ).get(workspace, {})
             for fragment, expression in expressions.items():
                 try:
-                    stats = ChargeCalculator.aggregate_charge(data["df"], expression)
+                    stats = ChargeCalculator.aggregate_charge(full_df, expression)
                 except TargetSelectionError as exc:
                     QMessageBox.warning(
                         self, "片段定义错误",
@@ -1385,6 +1476,7 @@ class MainWindow(QMainWindow):
         return cfg
 
     def _calculated_data_for_current_selection(self):
+        """Compatibility view of full scientific results for selected workspaces."""
         if not self.selected_workspaces:
             if self.current_ws in self.all_calculated_data:
                 return {self.current_ws: self.all_calculated_data[self.current_ws]}
@@ -1395,9 +1487,116 @@ class MainWindow(QMainWindow):
             if ws in self.all_calculated_data
         }
 
+    def _session_names(self, names=None):
+        candidates = list(names or self.selected_workspaces or [])
+        if not candidates and self.current_ws:
+            candidates = [self.current_ws]
+        available = []
+        for workspace in candidates:
+            try:
+                self.session_store.session(workspace)
+            except KeyError:
+                continue
+            available.append(workspace)
+        return available
+
+    def _selected_ids_by_workspace(self, names):
+        return {
+            workspace: self.session_store.session(workspace).selected_atom_ids
+            for workspace in self._session_names(names)
+        }
+
+    def _projected_data_for_workspaces(self, names=None):
+        return {
+            workspace: {
+                "df": self.session_store.projected_df(workspace),
+                "struct": self.session_store.session(workspace).structure,
+            }
+            for workspace in self._session_names(names)
+        }
+
+    def _commit_scope_and_refresh(self, scopes):
+        committed = self.session_store.commit_scopes(scopes)
+        for workspace, session in committed.items():
+            self._workspace_targets[workspace] = session.committed_scope
+            self.ws_mgr.save_analysis_metadata(
+                workspace,
+                session.committed_scope,
+                session.analysis_revision,
+                session.source_revision,
+            )
+        self._refresh_committed_views(list(committed))
+        return committed
+
+    def _refresh_committed_views(self, names):
+        names = self._session_names(names)
+        if not names:
+            return
+        current = self.current_ws if self.current_ws in names else names[0]
+        self.current_ws = current
+        self.current_df = self.session_store.projected_df(current)
+        self.update_table_view(self.current_df)
+        self.btn_elem_summary.setEnabled(not self.current_df.empty)
+
+        selected = self._selected_ids_by_workspace(names)
+        full_data = {
+            workspace: {
+                "df": self.session_store.full_df(workspace),
+                "struct": self.session_store.session(workspace).structure,
+            }
+            for workspace in names
+        }
+        self.plot_panel.plot_data(
+            full_data,
+            selected_by_workspace=selected,
+            fragments=self._fragment_expressions_for_workspaces(names),
+        )
+        session = self.session_store.session(current)
+        self.analysis_panel_plot.set_committed_scope(
+            session.committed_scope, len(session.selected_atom_ids)
+        )
+        self._update_scope_summary(session)
+        self._rebuild_multi_compare()
+        self._update_element_summary()
+        self._refresh_fragment_results()
+        self._request_3d_appearance_update(names)
+
+    def _update_scope_summary(self, session):
+        projected = self.session_store.projected_df(session.workspace_id)
+        if projected.empty:
+            stats = None
+            gain_str = loss_str = "-"
+        else:
+            values = projected["Bader_Charge"].astype(float)
+            stats = {
+                "count": len(projected),
+                "sum": float(values.sum()),
+                "mean": float(values.mean()),
+                "std": float(values.std(ddof=0)),
+                "max": float(values.max()),
+                "min": float(values.min()),
+            }
+            gain = projected.loc[values.idxmax()]
+            loss = projected.loc[values.idxmin()]
+            gain_str = f"{gain['Element']}{gain['Atom']} ({gain['Bader_Charge']:.3f} e)"
+            loss_str = f"{loss['Element']}{loss['Atom']} ({loss['Bader_Charge']:.3f} e)"
+        self.analysis_panel_plot.update_summary(
+            session.committed_scope,
+            stats["sum"] if stats else None,
+            gain_str,
+            loss_str,
+            stats=stats,
+        )
+
+    def _request_3d_appearance_update(self, names):
+        """Task 8 will specialize this into a geometry-free appearance update."""
+        if self._has_3d:
+            self._request_3d_sync()
+
     def _start_batch_analysis(self, names, config):
         self._batch_queue = list(names)
         self._batch_errors = []
+        self._batch_pending_results = {}
         self._batch_config = dict(config)
         self.lbl_status_indicator.setText(
             f"\u25cf \u6279\u91cf\u8ba1\u7b97\u4e2d 0/{len(self._batch_queue)}..."
@@ -1433,11 +1632,14 @@ class MainWindow(QMainWindow):
         if err:
             self._batch_errors.append(f"{workspace}: {err}")
         else:
-            self.all_calculated_data[workspace] = {"df": df, "struct": struct}
-            self._save_results(workspace, df)
+            self._batch_pending_results[workspace] = {
+                "df": df,
+                "struct": struct,
+                **self._source_revision_payload(workspace),
+            }
         self._run_next_batch_analysis()
 
-    def _finish_batch_analysis(self):
+    def _finish_batch_analysis_legacy(self):
         self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
         self.lbl_status_indicator.setStyleSheet("color: #198754; font-weight: bold;")
 
@@ -1486,10 +1688,45 @@ class MainWindow(QMainWindow):
                 "\n".join(self._batch_errors),
             )
 
+    def _finish_batch_analysis(self):
+        self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
+        self.lbl_status_indicator.setStyleSheet(
+            "color: #198754; font-weight: bold;"
+        )
+        if self._batch_errors:
+            QMessageBox.warning(
+                self,
+                "\u6279\u91cf\u8ba1\u7b97\u5931\u8d25",
+                "\n".join(self._batch_errors),
+            )
+            self._batch_pending_results = {}
+            return
+
+        scopes = {
+            workspace: self._config_for_workspace(
+                self._batch_config or {}, workspace
+            ).get("target", "")
+            for workspace in self._batch_pending_results
+        }
+        try:
+            self._publish_analysis_results(self._batch_pending_results, scopes)
+        except Exception as exc:
+            QMessageBox.warning(self, "\u6279\u91cf\u5206\u6790\u5931\u8d25", str(exc))
+            self._batch_pending_results = {}
+            return
+
+        for workspace, payload in self._batch_pending_results.items():
+            self._save_results(workspace, payload["df"])
+        names = list(self._batch_pending_results)
+        if names:
+            self.current_ws = names[0]
+            self._refresh_committed_views(names)
+        self._batch_pending_results = {}
+
     def update_progress(self, msg):
         pass
 
-    def on_analysis_finished(self, struct, df, err):
+    def _on_analysis_finished_legacy(self, struct, df, err):
         self.lbl_status_indicator.setText("\u25cf 就绪")
         self.lbl_status_indicator.setStyleSheet("color: #198754; font-weight: bold;")
 
@@ -1552,6 +1789,89 @@ class MainWindow(QMainWindow):
         self._update_element_summary()
         self._rebuild_multi_compare()
         self._refresh_fragment_results()
+
+    def on_analysis_finished(self, struct, df, err):
+        self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
+        self.lbl_status_indicator.setStyleSheet(
+            "color: #198754; font-weight: bold;"
+        )
+        if err:
+            QMessageBox.critical(self, "\u9519\u8bef", f"\u5206\u6790\u5931\u8d25:\n{err}")
+            return
+
+        workspace = self.current_ws
+        target = self._config_for_workspace(
+            self._single_config or {}, workspace
+        ).get("target", self.analysis_panel_plot.line_target.text().strip())
+        payload = {
+            "df": df,
+            "struct": struct,
+            **self._source_revision_payload(workspace),
+        }
+        try:
+            self._publish_analysis_results({workspace: payload}, {workspace: target})
+        except Exception as exc:
+            QMessageBox.warning(self, "\u76ee\u6807\u539f\u5b50\u9519\u8bef", str(exc))
+            return
+        self._save_results(workspace, df)
+        self._refresh_committed_views([workspace])
+        if self.analysis_panel_3d is not None:
+            if not df.empty:
+                self.analysis_panel_3d.update_elements(set(df["Element"].values))
+            self.analysis_panel_3d.emit_render_update()
+        self.lbl_status_rows.setText(f"\u884c\u6570: {len(self.current_df)}")
+        self.lbl_status_atoms.setText(
+            f"\u539f\u5b50\u6570: {len(struct) if struct else 0}"
+        )
+        self.lbl_status_time.setText(
+            "\u6700\u540e\u66f4\u65b0: "
+            + datetime.datetime.now().strftime("%H:%M")
+        )
+
+    def _source_revision_payload(self, workspace):
+        try:
+            revision = SourceRevision.from_workspace(
+                self.ws_mgr.get_workspace_path(workspace)
+            )
+            return {
+                "source_revision": revision.source_fingerprint,
+                "structure_revision": revision.structure_fingerprint,
+            }
+        except Exception:
+            return {"source_revision": "", "structure_revision": ""}
+
+    def _publish_analysis_results(self, payloads, scopes):
+        """Publish full worker results and committed scopes as one transaction."""
+        for workspace, expression in scopes.items():
+            df = payloads[workspace]["df"]
+            elements = df.sort_values("Atom")["Element"].astype(str).tolist()
+            SelectionResolver.resolve(expression, elements)
+
+        previous_sessions = dict(self.session_store._sessions)
+        previous_compat = dict(self.all_calculated_data)
+        try:
+            for workspace, payload in payloads.items():
+                self.session_store.put_full_result(workspace, payload)
+            committed = self.session_store.commit_scopes(scopes)
+        except Exception:
+            self.session_store._sessions = previous_sessions
+            self.all_calculated_data = previous_compat
+            raise
+
+        for workspace, payload in payloads.items():
+            self.all_calculated_data[workspace] = {
+                "df": self.session_store.full_df(workspace),
+                "struct": payload.get("struct"),
+            }
+        for workspace, session in committed.items():
+            self._workspace_targets[workspace] = session.committed_scope
+            self.ws_mgr.save_analysis_metadata(
+                workspace,
+                session.committed_scope,
+                session.analysis_revision,
+                session.source_revision,
+            )
+        return committed
 
     def _on_target_filter_changed(self, expression):
         if self.current_df is None or self.current_df.empty:
@@ -1658,7 +1978,7 @@ class MainWindow(QMainWindow):
         self.tab_multi_compare.setSortingEnabled(False)
 
         calculated = {
-            k: v for k, v in self._calculated_data_for_current_selection().items()
+            k: v for k, v in self._projected_data_for_workspaces().items()
             if v.get("df") is not None and not v["df"].empty
         }
 
@@ -1700,8 +2020,12 @@ class MainWindow(QMainWindow):
         self.tab_multi_compare.setHorizontalHeaderLabels(fixed_headers + charge_headers)
 
         # Row count = data rows + summary rows
-        first_df = calculated[ws_names[0]]["df"]
-        n_data = len(first_df)
+        atom_ids = sorted({
+            int(atom)
+            for data in calculated.values()
+            for atom in data["df"]["Atom"].tolist()
+        })
+        n_data = len(atom_ids)
         summary_labels = ["平均值", "标准差", "极差", "最大值", "最小值"]
         n_summary = len(summary_labels)
         total_rows = n_data + n_summary
@@ -1713,17 +2037,21 @@ class MainWindow(QMainWindow):
         summary_bg = QBrush(QColor("#3A3A3A" if dark else "#E8EAF0"))
 
         # Pre-compute per-atom, per-ws charge matrix for summary & coloring
-        charge_matrix = {}  # atom_idx -> list of charges per ws
-        for row_idx in range(n_data):
+        charge_matrix = {}  # display row -> list of charges per workspace
+        rows_by_workspace = {
+            ws: calculated[ws]["df"].drop_duplicates("Atom").set_index("Atom")
+            for ws in ws_names
+        }
+        for row_idx, atom_id in enumerate(atom_ids):
             charges = []
             for ws in ws_names:
-                df_ws = calculated[ws]["df"]
-                if row_idx < len(df_ws):
-                    val = df_ws.iloc[row_idx].get("Bader_Charge")
-                    if val is not None and not (isinstance(val, float) and math.isnan(val)):
-                        charges.append(float(val))
-                    else:
-                        charges.append(float("nan"))
+                indexed = rows_by_workspace[ws]
+                if atom_id not in indexed.index:
+                    charges.append(float("nan"))
+                    continue
+                val = indexed.loc[atom_id].get("Bader_Charge")
+                if val is not None and not pd.isna(val):
+                    charges.append(float(val))
                 else:
                     charges.append(float("nan"))
             charge_matrix[row_idx] = charges
@@ -1735,10 +2063,14 @@ class MainWindow(QMainWindow):
                     max_abs_charge = max(max_abs_charge, abs(c))
 
         # ── Fill data rows ──
-        for row_idx in range(n_data):
-            row_data = first_df.iloc[row_idx]
+        for row_idx, atom_id in enumerate(atom_ids):
+            row_data = next(
+                rows_by_workspace[ws].loc[atom_id]
+                for ws in ws_names
+                if atom_id in rows_by_workspace[ws].index
+            )
             fixed_vals = [
-                str(row_data["Atom"]),
+                str(atom_id),
                 str(row_data["Element"]),
                 self._fmt_val(row_data.get("ZVAL"), ".1f"),
                 self._fmt_val(row_data.get("X"), ".4f"),
@@ -1914,7 +2246,7 @@ class MainWindow(QMainWindow):
     #  Export methods
     # ────────────────────────────────────────────────────────────
 
-    def export_csv(self):
+    def _export_csv_legacy(self):
         """Export current single-system DataFrame as CSV."""
         if self.current_df is None or self.current_df.empty:
             return
@@ -1926,6 +2258,56 @@ class MainWindow(QMainWindow):
                 self.current_df.to_csv(path, index=False)
             except Exception as e:
                 QMessageBox.warning(self, "导出失败", f"无法写入 CSV:\n{e}")
+
+    def _current_export_df(self):
+        if not self.current_ws:
+            return None
+        try:
+            return self.session_store.projected_df(self.current_ws)
+        except KeyError:
+            return self.current_df.copy() if self.current_df is not None else None
+
+    def export_csv(self):
+        export_df = self._current_export_df()
+        if export_df is None or export_df.empty:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "\u5bfc\u51fa CSV",
+            "bader_charge_scope.csv",
+            "CSV Files (*.csv)",
+        )
+        if path:
+            try:
+                export_df.to_csv(path, index=False)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "\u5bfc\u51fa\u5931\u8d25", f"\u65e0\u6cd5\u5199\u5165 CSV:\n{exc}"
+                )
+
+    def export_full_csv(self):
+        if not self.current_ws:
+            return
+        try:
+            export_df = self.session_store.full_df(self.current_ws)
+        except KeyError:
+            data = self.all_calculated_data.get(self.current_ws)
+            export_df = data.get("df") if data else None
+        if export_df is None or export_df.empty:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "\u5bfc\u51fa\u5b8c\u6574\u539f\u59cb\u7ed3\u679c",
+            "bader_charge_full.csv",
+            "CSV Files (*.csv)",
+        )
+        if path:
+            try:
+                export_df.to_csv(path, index=False)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "\u5bfc\u51fa\u5931\u8d25", f"\u65e0\u6cd5\u5199\u5165 CSV:\n{exc}"
+                )
 
     def export_fragment_results(self):
         rows = self._refresh_fragment_results()
@@ -2679,7 +3061,23 @@ class MainWindow(QMainWindow):
 
         data = {"df": df, "struct": struct}
         self.all_calculated_data[ws_name] = data
+        self._put_loaded_result(ws_name, data)
         return data
+
+    def _put_loaded_result(self, ws_name, data):
+        metadata = self.ws_mgr.get_analysis_metadata(ws_name)
+        payload = {
+            "df": data["df"],
+            "struct": data.get("struct"),
+            "source_revision": metadata.get("source_revision", ""),
+            "structure_revision": metadata.get("source_revision", ""),
+        }
+        self.session_store.put_full_result(ws_name, payload)
+        scope = metadata.get("committed_scope", "")
+        try:
+            self.session_store.commit_scopes({ws_name: scope})
+        except Exception:
+            self.session_store.commit_scopes({ws_name: ""})
 
     # ────────────────────────────────────────────────────────────
     #  Theme

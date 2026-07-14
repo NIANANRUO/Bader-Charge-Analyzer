@@ -4,6 +4,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QInputDialog
+import pandas as pd
 
 from core.workspace_manager import WorkspaceManager
 from gui import main_window
@@ -214,5 +215,74 @@ def test_workspace_checkboxes_are_the_only_batch_selection_source(tmp_path):
         ws2.setSelected(True)
 
         assert window.get_selected_workspace_names() == ["ws1"]
+    finally:
+        window.close()
+
+
+def test_saved_fragment_definitions_persist_and_refresh_results(tmp_path):
+    app()
+    window, manager = build_window(tmp_path)
+    try:
+        manager.create_workspace("ws1")
+        manager.create_workspace("ws2")
+        window.load_workspaces()
+        find_workspace_item(window, "ws1").setCheckState(0, main_window.Qt.Checked)
+        find_workspace_item(window, "ws2").setCheckState(0, main_window.Qt.Checked)
+        frame = pd.DataFrame(
+            {
+                "Atom": [1, 2, 3],
+                "Element": ["O", "O", "Li"],
+                "Bader_Charge": [0.2, -0.1, 0.3],
+            }
+        )
+        window.all_calculated_data = {
+            "ws1": {"df": frame.copy()},
+            "ws2": {"df": frame.copy()},
+        }
+        fragments = {
+            "氧原子": {
+                "expression": "O",
+                "overrides": {"ws2": "1"},
+            }
+        }
+
+        window._on_fragments_changed(fragments, ["ws1", "ws2"])
+
+        assert manager.get_fragments("ws1") == fragments
+        assert manager.get_fragments("ws2") == fragments
+        assert window.analysis_panel_plot.get_fragments() == fragments
+        assert len(window.analysis_panel_plot._fragment_results) == 2
+        assert window.analysis_panel_plot._fragment_results[0]["sum"] == 0.1
+        assert window.analysis_panel_plot._fragment_results[1]["sum"] == 0.2
+    finally:
+        window.close()
+
+
+def test_fragment_context_prefers_checked_workspace_over_highlight(tmp_path):
+    app()
+    window, manager = build_window(tmp_path)
+    try:
+        manager.create_workspace("checked")
+        manager.create_workspace("highlighted")
+        checked_fragments = {
+            "批量片段": {"expression": "1-3", "overrides": {}}
+        }
+        manager.save_fragments("checked", checked_fragments)
+        manager.save_fragments(
+            "highlighted",
+            {"当前片段": {"expression": "4-6", "overrides": {}}},
+        )
+        window.load_workspaces()
+
+        checked_item = find_workspace_item(window, "checked")
+        highlighted_item = find_workspace_item(window, "highlighted")
+        checked_item.setCheckState(0, main_window.Qt.Checked)
+        window.ws_tree.setCurrentItem(highlighted_item)
+        highlighted_item.setSelected(True)
+        window.on_ws_selected(highlighted_item, 0)
+
+        assert window.current_ws == "highlighted"
+        assert window.get_selected_workspace_names() == ["checked"]
+        assert window.analysis_panel_plot.get_fragments() == checked_fragments
     finally:
         window.close()

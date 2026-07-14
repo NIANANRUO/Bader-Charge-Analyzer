@@ -27,3 +27,24 @@ def test_multi_compare_aligns_workspaces_by_atom_id():
     row2 = atoms[atoms["Atom"] == 2].iloc[0]
     assert row2["ws1_Bader_Charge"] == -0.2
     assert row2["ws2_Bader_Charge"] == -0.4
+
+
+def test_multi_compare_keeps_missing_scoped_atoms_as_nan():
+    first = pd.DataFrame({
+        "Atom": [1, 3], "Element": ["Li", "S"],
+        "Bader_Charge": [0.1, 0.3],
+    })
+    second = pd.DataFrame({
+        "Atom": [2, 3], "Element": ["O", "S"],
+        "Bader_Charge": [-0.4, 0.5],
+    })
+    owner = SimpleNamespace(_delta_mode=False, _baseline_ws="ws1")
+
+    result = MainWindow._build_multi_compare_df(
+        owner, {"ws1": {"df": first}, "ws2": {"df": second}}
+    )
+    atoms = result[pd.to_numeric(result["Atom"], errors="coerce").notna()]
+
+    assert atoms["Atom"].tolist() == [1, 2, 3]
+    assert pd.isna(atoms.loc[atoms["Atom"] == 1, "ws2_Bader_Charge"].iloc[0])
+    assert pd.isna(atoms.loc[atoms["Atom"] == 2, "ws1_Bader_Charge"].iloc[0])
