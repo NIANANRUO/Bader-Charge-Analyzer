@@ -606,6 +606,12 @@ class MainWindow(QMainWindow):
         self.btn_elem_summary.setEnabled(False)
         lay.addWidget(self.btn_elem_summary)
 
+        self.btn_export_single = QPushButton("导出")
+        self.btn_export_single.setIcon(qta.icon("fa5s.download", color="#198754"))
+        self.btn_export_single.setToolTip("导出当前已提交分析范围的 CSV 数据")
+        self.btn_export_single.clicked.connect(self.export_csv)
+        lay.addWidget(self.btn_export_single)
+
         btn_add_col = QPushButton("添加列")
         btn_add_col.setIcon(qta.icon("fa5s.plus-circle", color="#0D6EFD"))
         btn_add_col.clicked.connect(self._add_custom_column)

@@ -101,7 +101,8 @@ def test_scoped_and_full_exports_use_distinct_data(tmp_path, monkeypatch):
     paths = iter(((str(scoped_path), "CSV"), (str(full_path), "CSV")))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: next(paths))
 
-    window.export_csv()
+    assert window.btn_export_single.text() == "导出"
+    window.btn_export_single.click()
     window.export_full_csv()
 
     assert pd.read_csv(scoped_path)["Atom"].tolist() == [1, 2]
