@@ -156,3 +156,32 @@ def test_replacing_full_result_preserves_scopes_and_revision_and_reresolves_ids(
     assert session.draft_scope == "4"
     assert session.analysis_revision == 1
     assert session.selected_atom_ids == (1, 4)
+
+
+def test_snapshot_restore_and_remove_are_public_atomic_boundaries():
+    store = AnalysisSessionStore()
+    store.put_full_result("ws", payload())
+    store.commit_scopes({"ws": "1"})
+    snapshot = store.snapshot()
+
+    store.commit_scopes({"ws": "3"})
+    store.remove("ws")
+    store.restore(snapshot)
+
+    assert store.session("ws").selected_atom_ids == (1,)
+    assert store.full_df("ws")["Atom"].tolist() == [1, 2, 3, 4]
+
+
+def test_put_persisted_result_restores_exact_revision_and_structure_identity():
+    store = AnalysisSessionStore()
+
+    session = store.put_persisted_result(
+        "ws",
+        payload(structure_revision="structure-9"),
+        committed_scope="2-3",
+        analysis_revision=7,
+    )
+
+    assert session.selected_atom_ids == (2, 3)
+    assert session.analysis_revision == 7
+    assert session.structure_revision == "structure-9"

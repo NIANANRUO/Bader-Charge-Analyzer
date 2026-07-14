@@ -129,3 +129,51 @@ class AnalysisSessionStore:
 
     def projected_df(self, workspace_id: str) -> pd.DataFrame:
         return AnalysisProjection.dataframe(self._stored_session(workspace_id))
+
+    def snapshot(self) -> dict[str, AnalysisSession]:
+        """Return an owned snapshot suitable for transactional rollback."""
+        return {
+            workspace_id: self._snapshot(session)
+            for workspace_id, session in self._sessions.items()
+        }
+
+    def restore(self, snapshot: Mapping[str, AnalysisSession]) -> None:
+        """Atomically replace the store with a previously owned snapshot."""
+        restored = {
+            workspace_id: self._snapshot(session)
+            for workspace_id, session in snapshot.items()
+        }
+        self._sessions = restored
+
+    def remove(self, workspace_id: str) -> None:
+        self._sessions.pop(workspace_id, None)
+
+    def put_persisted_result(
+        self,
+        workspace_id: str,
+        payload: Mapping[str, Any],
+        *,
+        committed_scope: str,
+        analysis_revision: int,
+    ) -> AnalysisSession:
+        """Hydrate a saved result without inventing a new analysis revision."""
+        full_result = payload["df"].copy(deep=True)
+        text = str(committed_scope or "").strip()
+        elements = full_result.sort_values("Atom")["Element"].astype(str).tolist()
+        selected_atom_ids = SelectionResolver.resolve(text, elements)
+        source_revision = str(payload.get("source_revision", ""))
+        session = AnalysisSession(
+            workspace_id=workspace_id,
+            source_revision=source_revision,
+            structure_revision=str(
+                payload.get("structure_revision", source_revision)
+            ),
+            full_result=full_result,
+            structure=payload.get("struct"),
+            draft_scope=text,
+            committed_scope=text,
+            selected_atom_ids=selected_atom_ids,
+            analysis_revision=int(analysis_revision or 0),
+        )
+        self._sessions[workspace_id] = session
+        return self._snapshot(session)

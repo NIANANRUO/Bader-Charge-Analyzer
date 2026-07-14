@@ -7,6 +7,7 @@ import json
 import numpy as np
 import pandas as pd
 import datetime
+from copy import deepcopy
 import qtawesome as qta
 
 from PySide6.QtWidgets import (
@@ -196,7 +197,12 @@ class MainWindow(QMainWindow):
         self._batch_config = None
         self._batch_worker = None
         self._batch_pending_results = {}
+        self._batch_generation = 0
+        self._active_batch_id = None
         self._single_config = None
+        self._single_generation = 0
+        self._active_single_run_id = None
+        self._active_single_context = None
         self.session_store = AnalysisSessionStore()
         self.all_calculated_data = {}
         self.current_df = None
@@ -1284,7 +1290,7 @@ class MainWindow(QMainWindow):
         if not self.ws_mgr.invalidate_results(workspace, filename):
             return
         self.all_calculated_data.pop(workspace, None)
-        self.session_store._sessions.pop(workspace, None)
+        self.session_store.remove(workspace)
         if workspace == self.current_ws:
             self.current_df = None
             self.tab_data.setRowCount(0)
@@ -1340,14 +1346,23 @@ class MainWindow(QMainWindow):
             return
 
         self.current_ws = names[0]
-        self._single_config = dict(config)
-        ws_path = self.ws_mgr.get_workspace_path(self.current_ws)
+        workspace = self.current_ws
+        captured_config = deepcopy(config)
+        self._single_config = captured_config
+        self._single_generation += 1
+        run_id = self._single_generation
+        self._active_single_run_id = run_id
+        self._active_single_context = (workspace, captured_config)
+        ws_path = self.ws_mgr.get_workspace_path(workspace)
         bader_exe = self._find_bader_executable()
 
         from gui.worker import AnalysisWorker  # lazy: pulls in pymatgen chain
-        self.worker = AnalysisWorker(ws_path, config, bader_exe)
+        self.worker = AnalysisWorker(ws_path, captured_config, bader_exe)
         self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(self.on_analysis_finished)
+        self.worker.finished.connect(
+            lambda struct, df, err, rid=run_id, ws=workspace, cfg=captured_config:
+            self._on_single_analysis_finished(rid, ws, cfg, struct, df, err)
+        )
 
         self.lbl_status_indicator.setText("\u25cf \u8ba1\u7b97\u4e2d...")
         self.lbl_status_indicator.setStyleSheet("color: #0D6EFD; font-weight: bold;")
@@ -1492,12 +1507,25 @@ class MainWindow(QMainWindow):
         if not candidates and self.current_ws:
             candidates = [self.current_ws]
         available = []
+        skipped = []
         for workspace in candidates:
             try:
                 self.session_store.session(workspace)
             except KeyError:
-                continue
+                try:
+                    loaded = self._load_ws_data_from_disk(workspace)
+                except Exception as exc:
+                    loaded = None
+                    skipped.append(f"{workspace}: {exc}")
+                if loaded is None:
+                    if not any(item.startswith(f"{workspace}:") for item in skipped):
+                        skipped.append(f"{workspace}: no persisted analysis result")
+                    continue
             available.append(workspace)
+        if skipped and hasattr(self, "lbl_status_indicator"):
+            self.lbl_status_indicator.setText(
+                "\u25cf \u5df2\u8df3\u8fc7: " + "; ".join(skipped)
+            )
         return available
 
     def _selected_ids_by_workspace(self, names):
@@ -1594,19 +1622,25 @@ class MainWindow(QMainWindow):
             self._request_3d_sync()
 
     def _start_batch_analysis(self, names, config):
+        self._batch_generation += 1
+        batch_id = self._batch_generation
+        self._active_batch_id = batch_id
         self._batch_queue = list(names)
         self._batch_errors = []
         self._batch_pending_results = {}
-        self._batch_config = dict(config)
+        self._batch_config = deepcopy(config)
         self.lbl_status_indicator.setText(
             f"\u25cf \u6279\u91cf\u8ba1\u7b97\u4e2d 0/{len(self._batch_queue)}..."
         )
         self.lbl_status_indicator.setStyleSheet("color: #0D6EFD; font-weight: bold;")
-        self._run_next_batch_analysis()
+        self._run_next_batch_analysis(batch_id)
 
-    def _run_next_batch_analysis(self):
+    def _run_next_batch_analysis(self, batch_id=None):
+        batch_id = self._active_batch_id if batch_id is None else batch_id
+        if batch_id != self._active_batch_id:
+            return
         if not self._batch_queue:
-            self._finish_batch_analysis()
+            self._finish_batch_analysis(batch_id)
             return
 
         workspace = self._batch_queue.pop(0)
@@ -1618,7 +1652,8 @@ class MainWindow(QMainWindow):
         self._batch_worker = AnalysisWorker(ws_path, cfg, bader_exe)
         self._batch_worker.progress.connect(self.update_progress)
         self._batch_worker.finished.connect(
-            lambda struct, df, err, ws=workspace: self._on_batch_analysis_finished(ws, struct, df, err)
+            lambda struct, df, err, bid=batch_id, ws=workspace:
+            self._on_batch_analysis_finished(bid, ws, struct, df, err)
         )
 
         total = len(self.selected_workspaces) or len(self._batch_queue) + 1
@@ -1628,7 +1663,9 @@ class MainWindow(QMainWindow):
         )
         self._batch_worker.start()
 
-    def _on_batch_analysis_finished(self, workspace, struct, df, err):
+    def _on_batch_analysis_finished(self, batch_id, workspace, struct, df, err):
+        if batch_id != self._active_batch_id:
+            return
         if err:
             self._batch_errors.append(f"{workspace}: {err}")
         else:
@@ -1637,7 +1674,7 @@ class MainWindow(QMainWindow):
                 "struct": struct,
                 **self._source_revision_payload(workspace),
             }
-        self._run_next_batch_analysis()
+        self._run_next_batch_analysis(batch_id)
 
     def _finish_batch_analysis_legacy(self):
         self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
@@ -1688,7 +1725,10 @@ class MainWindow(QMainWindow):
                 "\n".join(self._batch_errors),
             )
 
-    def _finish_batch_analysis(self):
+    def _finish_batch_analysis(self, batch_id=None):
+        batch_id = self._active_batch_id if batch_id is None else batch_id
+        if batch_id != self._active_batch_id:
+            return
         self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
         self.lbl_status_indicator.setStyleSheet(
             "color: #198754; font-weight: bold;"
@@ -1700,6 +1740,7 @@ class MainWindow(QMainWindow):
                 "\n".join(self._batch_errors),
             )
             self._batch_pending_results = {}
+            self._active_batch_id = None
             return
 
         scopes = {
@@ -1713,6 +1754,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "\u6279\u91cf\u5206\u6790\u5931\u8d25", str(exc))
             self._batch_pending_results = {}
+            self._active_batch_id = None
             return
 
         for workspace, payload in self._batch_pending_results.items():
@@ -1722,6 +1764,7 @@ class MainWindow(QMainWindow):
             self.current_ws = names[0]
             self._refresh_committed_views(names)
         self._batch_pending_results = {}
+        self._active_batch_id = None
 
     def update_progress(self, msg):
         pass
@@ -1790,7 +1833,25 @@ class MainWindow(QMainWindow):
         self._rebuild_multi_compare()
         self._refresh_fragment_results()
 
+    def _on_single_analysis_finished(
+        self, run_id, workspace, config, struct, df, err
+    ):
+        if run_id != self._active_single_run_id:
+            return
+        self._active_single_run_id = None
+        self._active_single_context = None
+        self._complete_single_analysis(workspace, config, struct, df, err)
+
     def on_analysis_finished(self, struct, df, err):
+        """Compatibility entry point for callers without a captured run token."""
+        if self._active_single_context is None:
+            return
+        workspace, config = self._active_single_context
+        self._on_single_analysis_finished(
+            self._active_single_run_id, workspace, config, struct, df, err
+        )
+
+    def _complete_single_analysis(self, workspace, config, struct, df, err):
         self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
         self.lbl_status_indicator.setStyleSheet(
             "color: #198754; font-weight: bold;"
@@ -1799,9 +1860,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "\u9519\u8bef", f"\u5206\u6790\u5931\u8d25:\n{err}")
             return
 
-        workspace = self.current_ws
         target = self._config_for_workspace(
-            self._single_config or {}, workspace
+            config, workspace
         ).get("target", self.analysis_panel_plot.line_target.text().strip())
         payload = {
             "df": df,
@@ -1847,15 +1907,21 @@ class MainWindow(QMainWindow):
             elements = df.sort_values("Atom")["Element"].astype(str).tolist()
             SelectionResolver.resolve(expression, elements)
 
-        previous_sessions = dict(self.session_store._sessions)
+        previous_sessions = self.session_store.snapshot()
         previous_compat = dict(self.all_calculated_data)
+        previous_targets = dict(self._workspace_targets)
+        previous_states = {
+            workspace: self.ws_mgr.load_state(workspace)
+            for workspace in payloads
+        }
         try:
             for workspace, payload in payloads.items():
                 self.session_store.put_full_result(workspace, payload)
             committed = self.session_store.commit_scopes(scopes)
         except Exception:
-            self.session_store._sessions = previous_sessions
+            self.session_store.restore(previous_sessions)
             self.all_calculated_data = previous_compat
+            self._workspace_targets = previous_targets
             raise
 
         for workspace, payload in payloads.items():
@@ -1863,14 +1929,30 @@ class MainWindow(QMainWindow):
                 "df": self.session_store.full_df(workspace),
                 "struct": payload.get("struct"),
             }
-        for workspace, session in committed.items():
-            self._workspace_targets[workspace] = session.committed_scope
-            self.ws_mgr.save_analysis_metadata(
-                workspace,
-                session.committed_scope,
-                session.analysis_revision,
-                session.source_revision,
-            )
+        try:
+            for workspace, session in committed.items():
+                self._workspace_targets[workspace] = session.committed_scope
+                self.ws_mgr.save_analysis_metadata(
+                    workspace,
+                    session.committed_scope,
+                    session.analysis_revision,
+                    session.source_revision,
+                )
+        except Exception as publish_error:
+            self.session_store.restore(previous_sessions)
+            self.all_calculated_data = previous_compat
+            self._workspace_targets = previous_targets
+            rollback_errors = []
+            for workspace, state in previous_states.items():
+                try:
+                    self.ws_mgr.save_state(workspace, state)
+                except Exception as restore_error:
+                    rollback_errors.append(f"{workspace}: {restore_error}")
+            if rollback_errors and hasattr(publish_error, "add_note"):
+                publish_error.add_note(
+                    "Metadata rollback also failed: " + "; ".join(rollback_errors)
+                )
+            raise
         return committed
 
     def _on_target_filter_changed(self, expression):
@@ -3066,18 +3148,34 @@ class MainWindow(QMainWindow):
 
     def _put_loaded_result(self, ws_name, data):
         metadata = self.ws_mgr.get_analysis_metadata(ws_name)
+        try:
+            revision = SourceRevision.from_workspace(
+                self.ws_mgr.get_workspace_path(ws_name)
+            )
+            structure_revision = revision.structure_fingerprint
+        except Exception:
+            structure_revision = ""
         payload = {
             "df": data["df"],
             "struct": data.get("struct"),
             "source_revision": metadata.get("source_revision", ""),
-            "structure_revision": metadata.get("source_revision", ""),
+            "structure_revision": structure_revision,
         }
-        self.session_store.put_full_result(ws_name, payload)
         scope = metadata.get("committed_scope", "")
         try:
-            self.session_store.commit_scopes({ws_name: scope})
+            self.session_store.put_persisted_result(
+                ws_name,
+                payload,
+                committed_scope=scope,
+                analysis_revision=metadata.get("analysis_revision", 0),
+            )
         except Exception:
-            self.session_store.commit_scopes({ws_name: ""})
+            self.session_store.put_persisted_result(
+                ws_name,
+                payload,
+                committed_scope="",
+                analysis_revision=metadata.get("analysis_revision", 0),
+            )
 
     # ────────────────────────────────────────────────────────────
     #  Theme

@@ -3,9 +3,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pandas as pd
+import pytest
+from types import MethodType, SimpleNamespace
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from gui.main_window import MainWindow
+from core.analysis_session import AnalysisSessionStore
+from core.workspace_manager import WorkspaceManager
 
 
 _APP = None
@@ -127,3 +131,132 @@ def test_failed_batch_discards_all_staged_results(monkeypatch):
     assert window.session_store.session("ws").selected_atom_ids == (1,)
     assert "other" not in window.all_calculated_data
     window.close()
+
+
+def test_late_single_worker_callback_is_ignored_and_workspace_is_captured():
+    accepted = []
+    owner = SimpleNamespace(
+        _active_single_run_id=2,
+        _complete_single_analysis=lambda *args: accepted.append(args),
+    )
+
+    MainWindow._on_single_analysis_finished(
+        owner, 1, "old", {"target": "1"}, None, frame(), None
+    )
+    MainWindow._on_single_analysis_finished(
+        owner, 2, "captured", {"target": "3"}, None, frame(), None
+    )
+
+    assert len(accepted) == 1
+    assert accepted[0][0] == "captured"
+    assert accepted[0][1] == {"target": "3"}
+
+
+def test_late_batch_callback_cannot_pollute_new_batch():
+    owner = SimpleNamespace(
+        _active_batch_id=8,
+        _batch_errors=[],
+        _batch_pending_results={},
+        _source_revision_payload=lambda workspace: {},
+        _run_next_batch_analysis=lambda batch_id: None,
+    )
+
+    MainWindow._on_batch_analysis_finished(
+        owner, 7, "old", None, frame((9.0, 9.0, 9.0)), None
+    )
+    MainWindow._on_batch_analysis_finished(
+        owner, 8, "new", None, frame(), None
+    )
+
+    assert list(owner._batch_pending_results) == ["new"]
+
+
+def test_metadata_failure_rolls_back_sessions_cache_view_and_metadata():
+    old = frame()
+    store = AnalysisSessionStore()
+    store.put_full_result("ws1", {"df": old, "struct": None})
+    store.put_full_result("ws2", {"df": old, "struct": None})
+    store.commit_scopes({"ws1": "1", "ws2": "1"})
+    states = {
+        "ws1": {"analysis_scope": "1", "analysis_revision": 1},
+        "ws2": {"analysis_scope": "1", "analysis_revision": 1},
+    }
+
+    class Manager:
+        calls = 0
+
+        def load_state(self, workspace):
+            return dict(states[workspace])
+
+        def save_state(self, workspace, state):
+            states[workspace] = dict(state)
+
+        def save_analysis_metadata(self, workspace, scope, revision, source):
+            self.calls += 1
+            if self.calls == 2:
+                raise OSError("metadata write failed")
+            states[workspace].update(
+                analysis_scope=scope, analysis_revision=revision,
+                source_revision=source,
+            )
+
+    visible = old.iloc[[0]].copy()
+    owner = SimpleNamespace(
+        session_store=store,
+        all_calculated_data={
+            "ws1": {"df": old.copy(), "struct": None},
+            "ws2": {"df": old.copy(), "struct": None},
+        },
+        current_df=visible,
+        _workspace_targets={"ws1": "1", "ws2": "1"},
+        ws_mgr=Manager(),
+    )
+    before_states = {key: dict(value) for key, value in states.items()}
+
+    with pytest.raises(OSError, match="metadata write failed"):
+        MainWindow._publish_analysis_results(
+            owner,
+            {
+                "ws1": {"df": frame((4.0, 5.0, 6.0)), "struct": None},
+                "ws2": {"df": frame((7.0, 8.0, 9.0)), "struct": None},
+            },
+            {"ws1": "2", "ws2": "3"},
+        )
+
+    assert store.session("ws1").selected_atom_ids == (1,)
+    assert store.session("ws2").selected_atom_ids == (1,)
+    assert owner.all_calculated_data["ws1"]["df"].equals(old)
+    assert owner.current_df is visible
+    assert states == before_states
+
+
+def test_restart_loads_all_selected_persisted_workspaces(tmp_path):
+    manager = WorkspaceManager(str(tmp_path))
+    for workspace, scope, revision in (("ws1", "1", 3), ("ws2", "2-3", 5)):
+        manager.create_workspace(workspace)
+        path = manager.get_workspace_path(workspace)
+        frame().to_json(os.path.join(path, "results.json"), orient="records")
+        manager.save_analysis_metadata(workspace, scope, revision, f"source-{workspace}")
+
+    owner = SimpleNamespace(
+        session_store=AnalysisSessionStore(),
+        selected_workspaces=["ws1", "ws2"],
+        current_ws=None,
+        all_calculated_data={},
+        ws_mgr=manager,
+        lbl_status_indicator=SimpleNamespace(setText=lambda text: None),
+    )
+    owner._load_results = MethodType(MainWindow._load_results, owner)
+    owner._put_loaded_result = MethodType(MainWindow._put_loaded_result, owner)
+    owner._load_ws_data_from_disk = MethodType(MainWindow._load_ws_data_from_disk, owner)
+
+    names = MainWindow._session_names(owner, ["ws1", "ws2"])
+
+    assert names == ["ws1", "ws2"]
+    assert owner.session_store.session("ws1").analysis_revision == 3
+    assert owner.session_store.session("ws2").analysis_revision == 5
+    assert owner.session_store.session("ws2").selected_atom_ids == (2, 3)
+    assert (
+        owner.session_store.session("ws1").structure_revision
+        != owner.session_store.session("ws1").source_revision
+    )
