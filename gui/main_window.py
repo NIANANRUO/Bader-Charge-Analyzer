@@ -1664,9 +1664,19 @@ class MainWindow(QMainWindow):
             for name in names
             if (payload := self._workspace_3d_payload(name)) is not None
         }
-        complete = self.visualizer_3d.update_workspace_appearances(payloads, names)
+        try:
+            complete = self.visualizer_3d.update_workspace_appearances(payloads, names)
+        except Exception:
+            complete = False
         if complete is False:
-            self._request_3d_sync(force=True)
+            self._3d_dirty = True
+            if hasattr(self.visualizer_3d, "invalidate_workspace"):
+                for name in names:
+                    self.visualizer_3d.invalidate_workspace(name)
+            try:
+                self._request_3d_sync(force=True)
+            except Exception:
+                self._3d_dirty = True
         else:
             self._3d_dirty = False
 

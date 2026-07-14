@@ -1005,6 +1005,7 @@ class MultiVisualizer3DPanel(QWidget):
         self._load_timer_active = False
         self._load_generation = 0
         self._is_closing = False
+        self._visible_workspace_ids = ()
         self._scene_cache = SceneCache(capacity=6, release=self._release_cached_tile)
 
         self.grid = QGridLayout(self)
@@ -1019,8 +1020,12 @@ class MultiVisualizer3DPanel(QWidget):
     def set_workspaces_data(self, data_by_workspace, selected_names=None):
         if self._is_closing:
             return
-        selected_names = list(selected_names or data_by_workspace.keys())
+        selected_names = list(
+            data_by_workspace.keys() if selected_names is None else selected_names
+        )
         keep = set(selected_names)
+        self._visible_workspace_ids = tuple(selected_names)
+        complete = True
         self._pending_workspace_loads = []
         self._load_timer_active = False
         self._load_generation += 1
@@ -1051,8 +1056,13 @@ class MultiVisualizer3DPanel(QWidget):
                 self._pending_workspace_loads.append(
                     (name, data, geometry_key, appearance_key)
                 )
-            elif tile.get("appearance_key") != appearance_key:
-                self._update_tile_appearance(name, data, appearance_key)
+            else:
+                self._scene_cache.geometry(geometry_key)
+                if tile.get("appearance_key") != appearance_key:
+                    complete = (
+                        self._update_tile_appearance(name, data, appearance_key)
+                        and complete
+                    )
 
         if selected_names:
             self.active_workspace = self.active_workspace if self.active_workspace in keep else selected_names[0]
@@ -1060,6 +1070,7 @@ class MultiVisualizer3DPanel(QWidget):
             self.active_workspace = None
         self._rebuild_grid(selected_names)
         self._start_progressive_loading()
+        return complete
 
     def load_data(self, struct, df):
         name = self.active_workspace or "\u5f53\u524d\u5de5\u4f5c\u533a"
@@ -1192,11 +1203,17 @@ class MultiVisualizer3DPanel(QWidget):
             appearance_key = self._appearance_key(data)
             if tile.get("appearance_key") != appearance_key:
                 tile["data"] = data
-                self._update_tile_appearance(name, data, appearance_key)
+                complete = (
+                    self._update_tile_appearance(name, data, appearance_key)
+                    and complete
+                )
         return complete
 
     def invalidate_workspace(self, workspace):
         self._scene_cache.invalidate_workspace(workspace)
+        self._visible_workspace_ids = tuple(
+            name for name in self._visible_workspace_ids if name != workspace
+        )
         if self.active_workspace == workspace:
             self.active_workspace = None
         if self.maximized_workspace == workspace:
@@ -1204,11 +1221,15 @@ class MultiVisualizer3DPanel(QWidget):
 
     def _update_tile_appearance(self, name, data, appearance_key):
         tile = self.tiles[name]
-        tile["visualizer"].update_appearance(
-            data.get("df"), appearance_key.selected_atom_ids
-        )
+        try:
+            tile["visualizer"].update_appearance(
+                data.get("df"), appearance_key.selected_atom_ids
+            )
+        except Exception:
+            return False
         tile["appearance_key"] = appearance_key
         self._scene_cache.remember_appearance(name, appearance_key)
+        return True
 
     def _emit_atom_selected(self, workspace, data):
         self.active_workspace = workspace
@@ -1239,12 +1260,13 @@ class MultiVisualizer3DPanel(QWidget):
         self._rebuild_grid(list(self.tiles.keys()))
 
     def _active_visualizer(self):
-        if self.active_workspace in self.tiles:
+        visible = self._visible_workspace_ids
+        if self.active_workspace in visible and self.active_workspace in self.tiles:
             return self.tiles[self.active_workspace]["visualizer"]
-        if self.tiles:
-            first = next(iter(self.tiles))
-            self.active_workspace = first
-            return self.tiles[first]["visualizer"]
+        for name in visible:
+            if name in self.tiles:
+                self.active_workspace = name
+                return self.tiles[name]["visualizer"]
         return None
 
     def set_render_state(self, **settings):
@@ -1323,6 +1345,7 @@ class MultiVisualizer3DPanel(QWidget):
         for tile in list(self.tiles.values()):
             self._release_cached_tile(tile)
         self.tiles.clear()
+        self._visible_workspace_ids = ()
         self.active_workspace = None
         self.maximized_workspace = None
 

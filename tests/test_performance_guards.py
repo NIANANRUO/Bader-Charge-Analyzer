@@ -244,6 +244,122 @@ def test_analysis_panel_3d_does_not_emit_an_independent_empty_target():
     panel.close()
 
 
+def test_appearance_failure_keeps_old_key_and_requests_full_sync(monkeypatch):
+    app()
+    panel = MultiVisualizer3DPanel()
+
+    class FailingVisualizer(DummyVisualizer):
+        def update_appearance(self, df, selected_atom_ids):
+            raise RuntimeError("renderer failed")
+
+    visualizer = FailingVisualizer()
+    monkeypatch.setattr(
+        panel,
+        "_create_tile",
+        lambda _workspace: {
+            "frame": QFrame(),
+            "visualizer": visualizer,
+            "button": QPushButton(),
+            "geometry_key": None,
+            "appearance_key": None,
+        },
+    )
+    original = {"ws": semantic_data()}
+    panel.set_workspaces_data(original, ["ws"])
+    old_key = panel.tiles["ws"]["appearance_key"]
+    changed = dict(original["ws"], analysis_revision=2, selected_atom_ids=(2,))
+
+    assert panel.update_workspace_appearances({"ws": changed}, ["ws"]) is False
+    assert panel.tiles["ws"]["appearance_key"] == old_key
+
+    window = MainWindow()
+    window._has_3d = True
+    window._3d_loaded = True
+    window.visualizer_3d = panel
+    window.nav_tabs.setCurrentIndex(2)
+    monkeypatch.setattr(window, "_workspace_3d_payload", lambda _name: changed)
+    sync_calls = []
+    monkeypatch.setattr(
+        window,
+        "_request_3d_sync",
+        lambda force=False: sync_calls.append(force),
+    )
+    window._3d_dirty = False
+
+    window._request_3d_appearance_update(["ws"])
+
+    assert sync_calls == [True]
+    assert window._3d_dirty is True
+    window.visualizer_3d = None
+    window.close()
+    panel.close()
+
+
+def test_hidden_cached_tile_is_never_used_as_active_visualizer(monkeypatch):
+    app()
+    panel = MultiVisualizer3DPanel()
+    visualizer = DummyVisualizer()
+    visualizer.focus_calls = 0
+    visualizer.focus_atom = lambda: setattr(
+        visualizer, "focus_calls", visualizer.focus_calls + 1
+    )
+    monkeypatch.setattr(
+        panel,
+        "_create_tile",
+        lambda _workspace: {
+            "frame": QFrame(),
+            "visualizer": visualizer,
+            "button": QPushButton(),
+            "geometry_key": None,
+            "appearance_key": None,
+        },
+    )
+    panel.set_workspaces_data({"ws": semantic_data()}, ["ws"])
+
+    panel.set_workspaces_data({}, [])
+
+    assert panel._active_visualizer() is None
+    assert panel.plotter is None
+    panel.focus_atom()
+    panel.isolate_atom()
+    assert visualizer.focus_calls == 0
+    panel.close()
+
+
+def test_reusing_hidden_tile_touches_scene_lru(monkeypatch):
+    app()
+    panel = MultiVisualizer3DPanel()
+    panel._scene_cache.capacity = 2
+    visualizers = {}
+
+    def create_tile(workspace):
+        visualizer = DummyVisualizer()
+        visualizers[workspace] = visualizer
+        return {
+            "frame": QFrame(),
+            "visualizer": visualizer,
+            "button": QPushButton(),
+            "geometry_key": None,
+            "appearance_key": None,
+        }
+
+    monkeypatch.setattr(panel, "_create_tile", create_tile)
+    data = {
+        name: semantic_data(structure_revision=f"structure-{name}")
+        for name in ("a", "b", "c")
+    }
+    panel.set_workspaces_data({"a": data["a"]}, ["a"])
+    panel.set_workspaces_data({"b": data["b"]}, ["b"])
+    panel.set_workspaces_data({"a": data["a"]}, ["a"])
+
+    panel.set_workspaces_data({"c": data["c"]}, ["c"])
+
+    assert "a" in panel.tiles
+    assert "b" not in panel.tiles
+    assert "c" in panel.tiles
+    panel.close()
+
+
 def test_multi_visualizer_loads_many_workspaces_progressively(monkeypatch):
     app()
     panel = MultiVisualizer3DPanel()

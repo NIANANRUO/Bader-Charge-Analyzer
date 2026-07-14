@@ -70,3 +70,17 @@ def test_replacing_and_invalidating_release_each_scene_exactly_once():
     assert released == ["first", "replacement"]
     assert cache.geometry(key) is None
     assert cache.appearance("ws") is None
+
+
+def test_geometry_cache_hit_refreshes_lru_recency():
+    released = []
+    cache = SceneCache(capacity=2, release=released.append)
+    cache.remember_geometry(geometry_key("a"), "a")
+    cache.remember_geometry(geometry_key("b"), "b")
+    assert cache.geometry(geometry_key("a")) == "a"
+
+    cache.remember_geometry(geometry_key("c"), "c")
+
+    assert released == ["b"]
+    assert cache.geometry(geometry_key("a")) == "a"
+    assert cache.geometry(geometry_key("c")) == "c"
