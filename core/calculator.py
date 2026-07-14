@@ -149,7 +149,14 @@ class ChargeCalculator:
         return {str(element): float(value) for element, value in values.items()}
 
     @staticmethod
-    def prepare_plot_data(data_dict, level="atom", metric="sum", fragments=None, target=""):
+    def prepare_plot_data(
+        data_dict,
+        level="atom",
+        metric="sum",
+        fragments=None,
+        target="",
+        selected_by_workspace=None,
+    ):
         """Build plot-ready DataFrames at atom, fragment, or element level."""
         prepared = {}
         fragments = fragments or {}
@@ -157,16 +164,23 @@ class ChargeCalculator:
             df = payload.get("df")
             if df is None:
                 continue
+            scoped_df = df
+            if selected_by_workspace is not None:
+                selected_ids = selected_by_workspace.get(workspace)
+                if selected_ids is not None:
+                    scoped_df = df[df["Atom"].isin(selected_ids)].copy()
             if level == "atom":
-                plot_df = df.copy()
-                if target.strip() and not plot_df.empty:
+                plot_df = scoped_df.copy()
+                # Transitional compatibility for MainWindow callers.  Once a
+                # committed scope is supplied, target text is never reparsed.
+                if selected_by_workspace is None and target.strip() and not plot_df.empty:
                     elements = plot_df.sort_values("Atom")["Element"].astype(str).tolist()
                     indices = ChargeCalculator.parse_target_atoms(
                         target, int(plot_df["Atom"].max()), elements
                     )
                     plot_df = plot_df[plot_df["Atom"].isin(indices)].copy()
             elif level == "element":
-                grouped = df.groupby("Element")["Bader_Charge"]
+                grouped = scoped_df.groupby("Element")["Bader_Charge"]
                 values = grouped.sum() if metric == "sum" else grouped.mean()
                 plot_df = pd.DataFrame({
                     "Atom": values.index.astype(str),

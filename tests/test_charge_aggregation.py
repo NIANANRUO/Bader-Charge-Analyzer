@@ -76,3 +76,73 @@ def test_prepare_plot_data_supports_element_and_fragment_levels(charge_df):
     assert elements["ws1"]["df"].set_index("Atom").loc["O", "Bader_Charge"] == pytest.approx(0.2)
     assert fragments["ws1"]["df"].iloc[0]["Atom"] == "吸附物"
     assert fragments["ws1"]["df"].iloc[0]["Bader_Charge"] == pytest.approx(0.2)
+
+
+def test_prepare_plot_data_filters_atoms_by_committed_workspace_scope(charge_df):
+    struct = object()
+    data = {"ws1": {"df": charge_df, "struct": struct}}
+
+    prepared = ChargeCalculator.prepare_plot_data(
+        data,
+        level="atom",
+        selected_by_workspace={"ws1": (2, 3)},
+    )
+
+    assert prepared["ws1"]["df"]["Atom"].tolist() == [2, 3]
+    assert prepared["ws1"]["struct"] is struct
+    assert charge_df["Atom"].tolist() == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize(
+    ("metric", "expected"),
+    [("sum", 0.2), ("mean", 0.1)],
+)
+def test_prepare_plot_data_filters_before_element_aggregation(charge_df, metric, expected):
+    prepared = ChargeCalculator.prepare_plot_data(
+        {"ws1": {"df": charge_df, "struct": None}},
+        level="element",
+        metric=metric,
+        selected_by_workspace={"ws1": (2, 3)},
+    )
+
+    result = prepared["ws1"]["df"].set_index("Atom")
+    assert list(result.index) == ["O"]
+    assert result.loc["O", "Bader_Charge"] == pytest.approx(expected)
+
+
+def test_prepare_plot_data_fragments_always_use_full_workspace_data(charge_df):
+    prepared = ChargeCalculator.prepare_plot_data(
+        {"ws1": {"df": charge_df, "struct": None}},
+        level="fragment",
+        fragments={"ws1": {"outer": "1,4"}},
+        selected_by_workspace={"ws1": (2, 3)},
+    )
+
+    result = prepared["ws1"]["df"].iloc[0]
+    assert result["Atom"] == "outer"
+    assert result["Bader_Charge"] == pytest.approx(0.1)
+
+
+def test_prepare_plot_data_applies_distinct_scope_per_workspace(charge_df):
+    prepared = ChargeCalculator.prepare_plot_data(
+        {
+            "left": {"df": charge_df, "struct": None},
+            "right": {"df": charge_df, "struct": None},
+            "unscoped": {"df": charge_df, "struct": None},
+        },
+        selected_by_workspace={"left": (1,), "right": (4,)},
+    )
+
+    assert prepared["left"]["df"]["Atom"].tolist() == [1]
+    assert prepared["right"]["df"]["Atom"].tolist() == [4]
+    assert prepared["unscoped"]["df"]["Atom"].tolist() == [1, 2, 3, 4]
+
+
+def test_explicit_workspace_scope_wins_over_legacy_target(charge_df):
+    prepared = ChargeCalculator.prepare_plot_data(
+        {"ws1": {"df": charge_df, "struct": None}},
+        target="1",
+        selected_by_workspace={"ws1": (2, 3)},
+    )
+
+    assert prepared["ws1"]["df"]["Atom"].tolist() == [2, 3]

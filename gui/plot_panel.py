@@ -102,6 +102,7 @@ class PlotPanel(QWidget):
         self.current_data = {}
         self._raw_data = {}
         self._target_expression = ""
+        self._selected_by_workspace = None
         self._fragments_by_workspace = {}
         self._fragment_text = ""
         self.config = PlotConfig()
@@ -2944,17 +2945,25 @@ class PlotPanel(QWidget):
     #  Data entry point
     # ==================================================================
 
-    def plot_data(self, data_dict, target=None, fragments=None):
+    def plot_data(
+        self, data_dict, target=None, fragments=None, selected_by_workspace=None
+    ):
         if target is not None:
             self._target_expression = (target or "").strip()
         if fragments is not None:
             self._fragments_by_workspace = fragments or {}
+        if selected_by_workspace is not None:
+            self._selected_by_workspace = dict(selected_by_workspace)
         self._raw_data = dict(data_dict)
         self._set_prepared_plot_data()
 
-    def set_analysis_context(self, target="", fragments=None):
+    def set_analysis_context(
+        self, target="", fragments=None, selected_by_workspace=None
+    ):
         self._target_expression = (target or "").strip()
         self._fragments_by_workspace = fragments or {}
+        if selected_by_workspace is not None:
+            self._selected_by_workspace = dict(selected_by_workspace)
         if self._raw_data:
             self._rebuild_level_data()
 
@@ -2973,6 +2982,7 @@ class PlotPanel(QWidget):
                 metric=metric,
                 fragments=self._fragments_by_workspace,
                 target=self._target_expression,
+                selected_by_workspace=self._selected_by_workspace,
             )
         except TargetSelectionError as exc:
             QMessageBox.warning(self, "绘图筛选错误", str(exc))

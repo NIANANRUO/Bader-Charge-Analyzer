@@ -59,3 +59,78 @@ def test_plot_panel_element_level_switches_sum_and_mean(monkeypatch):
     panel.cb_element_metric.setCurrentText("平均值")
     assert panel.current_data["ws"]["df"].iloc[0]["Bader_Charge"] == pytest.approx(0.3)
     panel.close()
+
+
+def test_plot_panel_retains_committed_scope_across_level_rebuilds(monkeypatch):
+    app()
+    panel = PlotPanel()
+    monkeypatch.setattr(panel, "apply_styles", lambda: None)
+    data = {
+        "ws": {
+            "df": pd.DataFrame({
+                "Atom": [1, 2, 3, 4],
+                "Element": ["Li", "O", "O", "S"],
+                "Bader_Charge": [0.2, -0.3, 0.5, -0.1],
+            }),
+            "struct": None,
+        }
+    }
+
+    panel.plot_data(data, selected_by_workspace={"ws": (2, 3)})
+    assert panel._selected_by_workspace == {"ws": (2, 3)}
+    assert panel.current_data["ws"]["df"]["Atom"].tolist() == [2, 3]
+
+    panel.cb_data_level.setCurrentText("元素")
+    assert panel.current_data["ws"]["df"]["Atom"].tolist() == ["O"]
+
+    panel.cb_data_level.setCurrentText("原子")
+    assert panel.current_data["ws"]["df"]["Atom"].tolist() == [2, 3]
+    panel.close()
+
+
+def test_plot_panel_explicit_scope_ignores_legacy_target(monkeypatch):
+    app()
+    panel = PlotPanel()
+    monkeypatch.setattr(panel, "apply_styles", lambda: None)
+    data = {
+        "ws": {
+            "df": pd.DataFrame({
+                "Atom": [1, 2, 3],
+                "Element": ["Li", "O", "O"],
+                "Bader_Charge": [0.2, -0.3, 0.5],
+            }),
+            "struct": None,
+        }
+    }
+
+    panel.plot_data(
+        data,
+        target="1",
+        selected_by_workspace={"ws": (2, 3)},
+    )
+
+    assert panel.current_data["ws"]["df"]["Atom"].tolist() == [2, 3]
+    panel.close()
+
+
+def test_set_analysis_context_replaces_committed_workspace_scope(monkeypatch):
+    app()
+    panel = PlotPanel()
+    monkeypatch.setattr(panel, "apply_styles", lambda: None)
+    data = {
+        "ws": {
+            "df": pd.DataFrame({
+                "Atom": [1, 2, 3],
+                "Element": ["Li", "O", "O"],
+                "Bader_Charge": [0.2, -0.3, 0.5],
+            }),
+            "struct": None,
+        }
+    }
+    panel.plot_data(data, selected_by_workspace={"ws": (1,)})
+
+    panel.set_analysis_context(selected_by_workspace={"ws": (2, 3)})
+
+    assert panel._selected_by_workspace == {"ws": (2, 3)}
+    assert panel.current_data["ws"]["df"]["Atom"].tolist() == [2, 3]
+    panel.close()
