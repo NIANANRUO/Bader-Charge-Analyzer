@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 from pymatgen.core.structure import Structure
 
-from core.structure_model import Atom3D, Structure3D
+from core.structure_model import Atom3D, Bond3D, Structure3D
 
 
 def make_structure():
@@ -93,3 +93,42 @@ def test_structure3d_converts_nan_charge_fields_to_zero():
     assert model.atoms[0].charge == 0.0
     assert model.atoms[0].raw_charge == 0.0
     assert model.atoms[0].zval == 0.0
+
+
+def test_with_charges_preserves_geometry_bonds_and_atom_identity_fields():
+    model = Structure3D.from_pymatgen(make_structure(), make_df())
+    bond = Bond3D(1, 2, model.atoms[0].cart_coords, model.atoms[1].cart_coords, 2.5)
+    model.with_bonds((bond,))
+
+    updated = model.with_charges(
+        pd.DataFrame(
+            {
+                "Atom": [1, 2],
+                "Bader_Charge": [-0.1, 0.8],
+                "CHARGE": [5.9, 5.8],
+                "ZVAL": [6.0, 5.0],
+            }
+        )
+    )
+
+    assert updated is not model
+    assert updated.lattice_matrix == model.lattice_matrix
+    assert updated.bonds == model.bonds
+    assert [atom.atom_id for atom in updated.atoms] == [atom.atom_id for atom in model.atoms]
+    assert [atom.element for atom in updated.atoms] == [atom.element for atom in model.atoms]
+    assert [atom.cart_coords for atom in updated.atoms] == [atom.cart_coords for atom in model.atoms]
+    assert [atom.frac_coords for atom in updated.atoms] == [atom.frac_coords for atom in model.atoms]
+    assert [atom.charge for atom in updated.atoms] == [-0.1, 0.8]
+    assert [atom.raw_charge for atom in updated.atoms] == [5.9, 5.8]
+    assert [atom.zval for atom in updated.atoms] == [6.0, 5.0]
+
+
+def test_with_charges_keeps_existing_values_for_missing_atoms_and_fields():
+    model = Structure3D.from_pymatgen(make_structure(), make_df())
+
+    updated = model.with_charges(pd.DataFrame({"Atom": [1], "Bader_Charge": [float("nan")]}))
+
+    assert updated.atoms[0].charge == 0.0
+    assert updated.atoms[0].raw_charge == model.atoms[0].raw_charge
+    assert updated.atoms[0].zval == model.atoms[0].zval
+    assert updated.atoms[1] == model.atoms[1]

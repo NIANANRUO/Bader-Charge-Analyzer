@@ -8,6 +8,42 @@ import rendering.pyvista_structure_renderer as renderer_module
 from rendering.pyvista_structure_renderer import PyVistaStructureRenderer, RenderSettings
 
 
+class FakeProperty:
+    def __init__(self, kwargs):
+        self._kwargs = kwargs
+
+    @property
+    def color(self):
+        return self._kwargs.get("color")
+
+    @color.setter
+    def color(self, value):
+        self._kwargs["color"] = value
+
+    @property
+    def opacity(self):
+        return self._kwargs.get("opacity")
+
+    @opacity.setter
+    def opacity(self, value):
+        self._kwargs["opacity"] = value
+
+    @property
+    def ambient(self):
+        return self._kwargs.get("ambient")
+
+    @ambient.setter
+    def ambient(self, value):
+        self._kwargs["ambient"] = value
+
+
+class FakeActor:
+    def __init__(self, mesh, kwargs):
+        self.mesh = mesh
+        self.kwargs = kwargs
+        self.prop = FakeProperty(kwargs)
+
+
 class FakePlotter:
     def __init__(self):
         self.meshes = []
@@ -18,8 +54,9 @@ class FakePlotter:
         self.screenshots = []
 
     def add_mesh(self, mesh, **kwargs):
-        self.meshes.append((mesh, kwargs))
-        return {"mesh": mesh, "kwargs": kwargs}
+        actor = FakeActor(mesh, kwargs)
+        self.meshes.append((mesh, kwargs, actor))
+        return actor
 
     def add_axes(self):
         self.axes_added += 1
@@ -32,6 +69,10 @@ class FakePlotter:
 
     def add_point_labels(self, points, labels, **kwargs):
         self.point_labels.append((points, labels, kwargs))
+        return FakeActor(None, kwargs)
+
+    def remove_actor(self, actor, **_kwargs):
+        self.meshes = [entry for entry in self.meshes if entry[2] is not actor]
 
     def screenshot(self, path):
         self.screenshots.append(path)
@@ -105,7 +146,7 @@ def test_colorbar_uses_configured_colormap():
 
     colorbar_kwargs = next(
         kwargs
-        for _mesh, kwargs in plotter.meshes
+        for _mesh, kwargs, _actor in plotter.meshes
         if kwargs.get("show_scalar_bar")
     )
     assert colorbar_kwargs["cmap"] == "RdBu_r"
@@ -129,7 +170,7 @@ def test_element_coloring_uses_non_none_colors_for_unknown_elements():
 
     atom_colors = [
         kwargs.get("color")
-        for mesh, kwargs in plotter.meshes
+        for mesh, kwargs, _actor in plotter.meshes
         if mesh in renderer.atom_meshes.values()
     ]
     assert atom_colors
@@ -150,7 +191,7 @@ def test_visible_atom_ids_fades_non_target_atoms_without_filtering_them():
     mesh_to_atom_id = {id(m): aid for aid, m in renderer.atom_meshes.items()}
     atom_opacities = {
         mesh_to_atom_id[id(mesh)]: kwargs.get("opacity")
-        for mesh, kwargs in plotter.meshes
+        for mesh, kwargs, _actor in plotter.meshes
         if id(mesh) in mesh_to_atom_id
     }
     assert atom_opacities == {1: 1.0, 2: 0.25}
@@ -167,7 +208,7 @@ def test_visible_atom_ids_do_not_fade_when_fade_background_is_false():
 
     atom_opacities = [
         kwargs.get("opacity")
-        for mesh, kwargs in plotter.meshes
+        for mesh, kwargs, _actor in plotter.meshes
         if mesh in renderer.atom_meshes.values()
     ]
     assert atom_opacities == [1.0, 1.0]
@@ -184,7 +225,7 @@ def test_bonds_fade_when_either_endpoint_is_outside_visible_atom_ids():
 
     bond_kwargs = next(
         kwargs
-        for _mesh, kwargs in plotter.meshes
+        for _mesh, kwargs, _actor in plotter.meshes
         if kwargs.get("color") == renderer_module.BOND_COLOR
     )
     assert bond_kwargs["opacity"] == 0.25
@@ -200,7 +241,7 @@ def test_bonds_stay_opaque_when_visible_filter_is_disabled_or_contains_both_endp
     )
     bond_kwargs = next(
         kwargs
-        for _mesh, kwargs in plotter.meshes
+        for _mesh, kwargs, _actor in plotter.meshes
         if kwargs.get("color") == renderer_module.BOND_COLOR
     )
     assert bond_kwargs["opacity"] == 1.0
@@ -213,7 +254,7 @@ def test_bonds_stay_opaque_when_visible_filter_is_disabled_or_contains_both_endp
     )
     bond_kwargs = next(
         kwargs
-        for _mesh, kwargs in plotter.meshes
+        for _mesh, kwargs, _actor in plotter.meshes
         if kwargs.get("color") == renderer_module.BOND_COLOR
     )
     assert bond_kwargs["opacity"] == 1.0
@@ -230,13 +271,13 @@ def test_selected_atom_keeps_charge_color_and_adds_highlight_mesh():
 
     selected_atom_kwargs = next(
         kwargs
-        for mesh, kwargs in plotter.meshes
+        for mesh, kwargs, _actor in plotter.meshes
         if mesh is renderer.atom_meshes[1]
     )
     red, _green, blue = selected_atom_kwargs["color"]
     assert red > blue
     assert selected_atom_kwargs["color"] != renderer_module.SELECTED_HIGHLIGHT_COLOR
-    assert any(kwargs.get("style") == "wireframe" for _mesh, kwargs in plotter.meshes)
+    assert any(kwargs.get("style") == "wireframe" for _mesh, kwargs, _actor in plotter.meshes)
 
 
 def test_atom_meshes_have_atom_id_in_cell_data():
@@ -262,7 +303,7 @@ def test_colorbar_dummy_mesh_is_not_pickable():
 
     colorbar_kwargs = next(
         kwargs
-        for _mesh, kwargs in plotter.meshes
+        for _mesh, kwargs, _actor in plotter.meshes
         if kwargs.get("show_scalar_bar")
     )
     assert colorbar_kwargs["pickable"] is False
@@ -345,3 +386,95 @@ def test_clear_resets_plotter_and_internal_state():
     assert plotter.clears == 2
     assert renderer.atom_meshes == {}
     assert renderer.export_meshes == []
+
+
+def test_charge_appearance_uses_only_target_atom_charges_and_keeps_context_color():
+    plotter = FakePlotter()
+    renderer = PyVistaStructureRenderer(plotter)
+    model = make_model()
+    settings = RenderSettings(
+        visible_atom_ids={1},
+        color_by="Bader Charge",
+        background_opacity=0.25,
+        show_bonds=False,
+        show_cell=False,
+    )
+
+    renderer.build_geometry(model, settings)
+    renderer.update_appearance(model, settings)
+
+    assert renderer.last_charge_clim == pytest.approx((-0.6, 0.6))
+    assert renderer.atom_actors[1].prop.color != renderer.atom_actors[2].prop.color
+    assert renderer.atom_actors[2].prop.color == renderer_module.FALLBACK_ELEMENT_COLOR
+    assert renderer.atom_actors[1].prop.opacity == 1.0
+    assert renderer.atom_actors[2].prop.opacity == 0.25
+
+
+def test_appearance_update_does_not_rebuild_structure_geometry():
+    plotter = FakePlotter()
+    renderer = PyVistaStructureRenderer(plotter)
+    model = make_model()
+    initial = RenderSettings(show_bonds=True, show_cell=True, color_by="Element")
+    renderer.build_geometry(model, initial)
+    clears = plotter.clears
+    atom_mesh_ids = {atom_id: id(mesh) for atom_id, mesh in renderer.atom_meshes.items()}
+    bond_actor_ids = [id(actor) for actor in renderer.bond_actors]
+    cell_actor_ids = [id(actor) for actor in renderer.cell_actors]
+
+    renderer.update_appearance(
+        model,
+        RenderSettings(
+            visible_atom_ids={2},
+            color_by="Bader Charge",
+            show_bonds=True,
+            show_cell=True,
+        ),
+    )
+
+    assert plotter.clears == clears
+    assert {atom_id: id(mesh) for atom_id, mesh in renderer.atom_meshes.items()} == atom_mesh_ids
+    assert [id(actor) for actor in renderer.bond_actors] == bond_actor_ids
+    assert [id(actor) for actor in renderer.cell_actors] == cell_actor_ids
+
+
+def test_unchanged_selection_labels_and_scalarbar_are_not_rebuilt():
+    plotter = FakePlotter()
+    renderer = PyVistaStructureRenderer(plotter)
+    model = make_model()
+    settings = RenderSettings(
+        selected_atom_id=1,
+        show_labels=True,
+        label_atom_ids={1},
+        show_bonds=False,
+        show_cell=False,
+    )
+    renderer.build_geometry(model, settings)
+    renderer.update_appearance(model, settings)
+    highlight = renderer._highlight_actor
+    labels = renderer._labels_actor
+    scalarbar = renderer._scalarbar_actor
+
+    renderer.update_appearance(model, settings)
+
+    assert renderer._highlight_actor is highlight
+    assert renderer._labels_actor is labels
+    assert renderer._scalarbar_actor is scalarbar
+
+
+def test_empty_target_and_non_finite_target_charges_are_stable():
+    plotter = FakePlotter()
+    renderer = PyVistaStructureRenderer(plotter)
+    model = make_model().with_charges(
+        __import__("pandas").DataFrame(
+            {"Atom": [1, 2], "Bader_Charge": [float("nan"), float("inf")]}
+        )
+    )
+    settings = RenderSettings(
+        visible_atom_ids=set(), color_by="Bader Charge", show_bonds=False, show_cell=False
+    )
+
+    renderer.build_geometry(model, settings)
+    renderer.update_appearance(model, settings)
+
+    assert renderer.last_charge_clim == (-1.0, 1.0)
+    assert all(actor.prop.color is not None for actor in renderer.atom_actors.values())

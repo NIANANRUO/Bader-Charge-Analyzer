@@ -57,30 +57,45 @@ class PyVistaStructureRenderer:
     def __init__(self, plotter: Any) -> None:
         self.plotter = plotter
         self.atom_meshes: dict[int, pv.PolyData] = {}
+        self.atom_actors: dict[int, Any] = {}
+        self.bond_actors: list[Any] = []
+        self.cell_actors: list[Any] = []
         self.export_meshes: list[pv.PolyData] = []
+        self.last_charge_clim = (-1.0, 1.0)
         self._highlight_actor = None
+        self._highlight_signature = None
+        self._labels_actor = None
+        self._labels_signature = None
+        self._scalarbar_actor = None
+        self._scalarbar_signature = None
 
     def clear(self) -> None:
         self.plotter.clear()
         self.atom_meshes.clear()
+        self.atom_actors.clear()
+        self.bond_actors.clear()
+        self.cell_actors.clear()
         self.export_meshes.clear()
         self._highlight_actor = None
+        self._highlight_signature = None
+        self._labels_actor = None
+        self._labels_signature = None
+        self._scalarbar_actor = None
+        self._scalarbar_signature = None
 
     def render(self, model: Structure3D, settings: RenderSettings) -> None:
+        self.build_geometry(model, settings)
+        self.update_appearance(model, settings)
+
+    def build_geometry(self, model: Structure3D, settings: RenderSettings) -> None:
         self.clear()
         atoms = list(model.atoms)
-        charge_mapper = ChargeColorMapper(
-            (atom.charge for atom in atoms),
-            gamma=settings.cmap_gamma,
-            range_mode=settings.cmap_range,
-            profile=settings.color_profile,
-        )
 
         if settings.show_axes:
             self.plotter.add_axes()
 
         for atom in atoms:
-            self._add_atom(atom, settings, charge_mapper)
+            self._add_atom(atom, settings)
 
         if settings.show_bonds:
             for bond in model.bonds:
@@ -90,11 +105,44 @@ class PyVistaStructureRenderer:
             for line in self._unit_cell_lines(model.lattice_matrix):
                 self._add_cell_line(line, settings)
 
-        if settings.show_labels:
-            self._add_labels(atoms, settings)
+    def update_appearance(self, model: Structure3D, settings: RenderSettings) -> None:
+        atoms = list(model.atoms)
+        atom_by_id = {atom.atom_id: atom for atom in atoms}
+        target_ids = (
+            set(atom_by_id)
+            if settings.visible_atom_ids is None
+            else set(settings.visible_atom_ids) & set(atom_by_id)
+        )
+        charge_mapper = ChargeColorMapper(
+            (atom_by_id[atom_id].charge for atom_id in target_ids),
+            gamma=settings.cmap_gamma,
+            range_mode=settings.cmap_range,
+            profile=settings.color_profile,
+        )
+        self.last_charge_clim = charge_mapper.clim
 
-        if settings.color_by in ("Bader 电荷", "Bader Charge"):
-            self._add_charge_colorbar(charge_mapper, settings)
+        for atom_id, actor in self.atom_actors.items():
+            atom = atom_by_id.get(atom_id)
+            if atom is None:
+                continue
+            actor.prop.color = self._appearance_atom_color(
+                atom, target_ids, settings, charge_mapper
+            )
+            actor.prop.opacity = self._atom_opacity(atom, settings)
+            actor.prop.ambient = settings.ambient_light
+
+        for bond, actor in zip(model.bonds, self.bond_actors):
+            actor.prop.color = BOND_COLOR
+            actor.prop.opacity = self._bond_opacity(bond, settings)
+            actor.prop.ambient = settings.ambient_light
+
+        for actor in self.cell_actors:
+            actor.prop.color = CELL_COLOR
+            actor.prop.ambient = settings.ambient_light
+
+        self._update_highlight(atom_by_id, settings)
+        self._update_labels(atoms, settings)
+        self._update_charge_colorbar(charge_mapper, settings)
 
         self.plotter.update()
 
@@ -158,7 +206,7 @@ class PyVistaStructureRenderer:
 
         raise ValueError(f"Unsupported export format: {suffix or '<none>'}")
 
-    def _add_atom(self, atom: Atom3D, settings: RenderSettings, charge_mapper: ChargeColorMapper) -> None:
+    def _add_atom(self, atom: Atom3D, settings: RenderSettings) -> None:
         radius = self._atom_radius(atom, settings)
         mesh = pv.Sphere(radius=radius, center=atom.cart_coords, theta_resolution=32, phi_resolution=32)
         # Embed atom_id into the mesh's cell data so that vtkCellPicker can
@@ -166,20 +214,16 @@ class PyVistaStructureRenderer:
         # comparison needed (which is unreliable due to VTK Python proxy
         # objects creating new wrappers on every access).
         mesh.cell_data["atom_id"] = [atom.atom_id] * mesh.n_cells
-        color = self._atom_color(atom, settings, charge_mapper)
-        opacity = self._atom_opacity(atom, settings)
-
-        self.plotter.add_mesh(
+        actor = self.plotter.add_mesh(
             mesh,
-            color=color,
-            opacity=opacity,
+            color=ELEMENT_COLORS.get(atom.element, FALLBACK_ELEMENT_COLOR),
+            opacity=1.0,
             smooth_shading=True,
             ambient=settings.ambient_light,
         )
         self.atom_meshes[atom.atom_id] = mesh
+        self.atom_actors[atom.atom_id] = actor
         self.export_meshes.append(mesh)
-        if atom.atom_id == settings.selected_atom_id:
-            self._highlight_actor = self._add_selection_highlight(atom, radius, settings)
 
     def _add_selection_highlight(self, atom: Atom3D, radius: float, settings: RenderSettings):
         mesh = pv.Sphere(radius=radius * 1.12, center=atom.cart_coords, theta_resolution=32, phi_resolution=32)
@@ -196,13 +240,14 @@ class PyVistaStructureRenderer:
 
     def _add_bond(self, bond: Bond3D, settings: RenderSettings) -> None:
         mesh = pv.Line(bond.start, bond.end).tube(radius=settings.bond_radius)
-        self.plotter.add_mesh(
+        actor = self.plotter.add_mesh(
             mesh,
             color=BOND_COLOR,
             opacity=self._bond_opacity(bond, settings),
             smooth_shading=True,
             ambient=settings.ambient_light,
         )
+        self.bond_actors.append(actor)
         self.export_meshes.append(mesh)
 
     def _add_cell_line(
@@ -211,10 +256,13 @@ class PyVistaStructureRenderer:
         settings: RenderSettings,
     ) -> None:
         mesh = pv.Line(line[0], line[1])
-        self.plotter.add_mesh(mesh, color=CELL_COLOR, line_width=2, ambient=settings.ambient_light)
+        actor = self.plotter.add_mesh(
+            mesh, color=CELL_COLOR, line_width=2, ambient=settings.ambient_light
+        )
+        self.cell_actors.append(actor)
         self.export_meshes.append(mesh)
 
-    def _add_labels(self, atoms: list[Atom3D], settings: RenderSettings) -> None:
+    def _add_labels(self, atoms: list[Atom3D], settings: RenderSettings) -> Any:
         label_atoms = [
             atom
             for atom in atoms
@@ -222,7 +270,7 @@ class PyVistaStructureRenderer:
         ]
         if not label_atoms:
             return
-        self.plotter.add_point_labels(
+        return self.plotter.add_point_labels(
             [atom.cart_coords for atom in label_atoms],
             [f"{atom.atom_id} {atom.element}" for atom in label_atoms],
             point_size=0,
@@ -230,10 +278,10 @@ class PyVistaStructureRenderer:
             shape_opacity=0.35,
         )
 
-    def _add_charge_colorbar(self, charge_mapper: ChargeColorMapper, settings: RenderSettings) -> None:
+    def _add_charge_colorbar(self, charge_mapper: ChargeColorMapper, settings: RenderSettings) -> Any:
         dummy = pv.PolyData([(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)])
         dummy["Bader Charge"] = [charge_mapper.clim[0], charge_mapper.clim[1]]
-        self.plotter.add_mesh(
+        return self.plotter.add_mesh(
             dummy,
             scalars="Bader Charge",
             cmap=settings.cmap,
@@ -264,6 +312,69 @@ class PyVistaStructureRenderer:
                 ELEMENT_COLORS.get(atom.element, FALLBACK_ELEMENT_COLOR),
             )
         return charge_mapper.rgb_for_charge(atom.charge)
+
+    @staticmethod
+    def _appearance_atom_color(
+        atom: Atom3D,
+        target_ids: set[int],
+        settings: RenderSettings,
+        charge_mapper: ChargeColorMapper,
+    ) -> tuple[float, float, float]:
+        if settings.color_by in ("Bader 电荷", "Bader Charge"):
+            if atom.atom_id in target_ids:
+                return charge_mapper.rgb_for_charge(atom.charge)
+            return ELEMENT_COLORS.get(atom.element, FALLBACK_ELEMENT_COLOR)
+        return PyVistaStructureRenderer._atom_color(atom, settings, charge_mapper)
+
+    def _update_highlight(
+        self, atom_by_id: dict[int, Atom3D], settings: RenderSettings
+    ) -> None:
+        signature = (
+            settings.selected_atom_id,
+            settings.sphere_scale,
+            settings.representation,
+        )
+        if signature == self._highlight_signature:
+            if self._highlight_actor is not None:
+                self._highlight_actor.prop.ambient = settings.ambient_light
+            return
+        if self._highlight_actor is not None:
+            self.plotter.remove_actor(self._highlight_actor)
+            self._highlight_actor = None
+        atom = atom_by_id.get(settings.selected_atom_id)
+        if atom is not None:
+            self._highlight_actor = self._add_selection_highlight(
+                atom, self._atom_radius(atom, settings), settings
+            )
+        self._highlight_signature = signature
+
+    def _update_labels(self, atoms: list[Atom3D], settings: RenderSettings) -> None:
+        signature = (
+            settings.show_labels,
+            None if settings.label_atom_ids is None else tuple(sorted(settings.label_atom_ids)),
+        )
+        if signature == self._labels_signature:
+            return
+        if self._labels_actor is not None:
+            self.plotter.remove_actor(self._labels_actor)
+            self._labels_actor = None
+        if settings.show_labels:
+            self._labels_actor = self._add_labels(atoms, settings)
+        self._labels_signature = signature
+
+    def _update_charge_colorbar(
+        self, charge_mapper: ChargeColorMapper, settings: RenderSettings
+    ) -> None:
+        enabled = settings.color_by in ("Bader 电荷", "Bader Charge")
+        signature = (enabled, settings.cmap, charge_mapper.clim)
+        if signature == self._scalarbar_signature:
+            return
+        if self._scalarbar_actor is not None:
+            self.plotter.remove_actor(self._scalarbar_actor)
+            self._scalarbar_actor = None
+        if enabled:
+            self._scalarbar_actor = self._add_charge_colorbar(charge_mapper, settings)
+        self._scalarbar_signature = signature
 
     @staticmethod
     def _atom_opacity(atom: Atom3D, settings: RenderSettings) -> float:

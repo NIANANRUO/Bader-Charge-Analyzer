@@ -45,3 +45,10 @@ def test_non_finite_charges_are_ignored_for_clim_and_mapped_as_neutral():
     assert mapper.clim == (-0.25, 0.25)
     assert mapper.rgb_for_charge(float("nan")) == (0.85, 0.85, 0.85)
     assert mapper.label_for_charge(float("nan")) == "neutral"
+
+
+def test_single_finite_charge_produces_a_stable_symmetric_clim():
+    mapper = ChargeColorMapper([0.6, float("nan")])
+
+    assert mapper.clim == (-0.6, 0.6)
+    assert all(0.0 <= channel <= 1.0 for channel in mapper.rgb_for_charge(0.6))

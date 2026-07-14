@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Any, Iterable
 
@@ -75,6 +75,28 @@ class Structure3D:
     def with_bonds(self, bonds: Iterable[Bond3D]) -> "Structure3D":
         self.bonds = tuple(bonds)
         return self
+
+    def with_charges(self, df: Any) -> "Structure3D":
+        """Return a charge-updated copy without rebuilding structural geometry."""
+        charge_rows = self._charge_rows_by_atom_id(df)
+        updated_atoms = []
+        for atom in self.atoms:
+            row = charge_rows.get(atom.atom_id)
+            if row is None:
+                updated_atoms.append(atom)
+                continue
+
+            changes = {}
+            for column, attribute in (
+                ("Bader_Charge", "charge"),
+                ("CHARGE", "raw_charge"),
+                ("ZVAL", "zval"),
+            ):
+                if column in row:
+                    changes[attribute] = self._float_field(row, column)
+            updated_atoms.append(replace(atom, **changes))
+
+        return replace(self, atoms=tuple(updated_atoms))
 
     @staticmethod
     def _coords_tuple(coords: Any) -> tuple[float, float, float]:
