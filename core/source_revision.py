@@ -1,9 +1,14 @@
 """Deterministic revision fingerprints for workspace analysis inputs."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
+import os
 from pathlib import Path
+
+
+_HASH_CHUNK_SIZE = 1024 * 1024
 
 
 def _digest(value):
@@ -11,16 +16,32 @@ def _digest(value):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _hash_file_content(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(_HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=256)
+def _cached_content_hash(canonical_path, size, mtime_ns):
+    return _hash_file_content(canonical_path)
+
+
 def _file_signature(path):
     resolved = path.resolve()
     if not path.is_file():
         return {"path": str(resolved), "missing": True}
     stat = path.stat()
+    canonical_path = os.path.normcase(str(resolved))
     return {
-        "path": str(resolved),
+        "path": canonical_path,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "sha256": _cached_content_hash(
+            canonical_path, stat.st_size, stat.st_mtime_ns
+        ),
     }
 
 
