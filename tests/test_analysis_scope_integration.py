@@ -137,6 +137,7 @@ def test_late_single_worker_callback_is_ignored_and_workspace_is_captured():
     accepted = []
     owner = SimpleNamespace(
         _active_single_run_id=2,
+        _active_analysis_generation=2,
         _complete_single_analysis=lambda *args: accepted.append(args),
     )
 
@@ -155,6 +156,7 @@ def test_late_single_worker_callback_is_ignored_and_workspace_is_captured():
 def test_late_batch_callback_cannot_pollute_new_batch():
     owner = SimpleNamespace(
         _active_batch_id=8,
+        _active_analysis_generation=8,
         _batch_errors=[],
         _batch_pending_results={},
         _source_revision_payload=lambda workspace: {},
@@ -169,6 +171,84 @@ def test_late_batch_callback_cannot_pollute_new_batch():
     )
 
     assert list(owner._batch_pending_results) == ["new"]
+
+
+def test_single_then_batch_ignores_late_single_result():
+    accepted = []
+    owner = SimpleNamespace(
+        _active_analysis_generation=2,
+        _active_single_run_id=1,
+        _active_batch_id=2,
+        _batch_errors=[],
+        _batch_pending_results={},
+        _source_revision_payload=lambda workspace: {},
+        _run_next_batch_analysis=lambda generation: accepted.append("batch"),
+        _complete_single_analysis=lambda *args: accepted.append("single"),
+    )
+
+    MainWindow._on_single_analysis_finished(
+        owner, 1, "old-single", {}, None, frame(), None
+    )
+    MainWindow._on_batch_analysis_finished(
+        owner, 2, "new-batch", None, frame(), None
+    )
+
+    assert accepted == ["batch"]
+    assert list(owner._batch_pending_results) == ["new-batch"]
+
+
+def test_batch_then_single_ignores_late_batch_result():
+    accepted = []
+    owner = SimpleNamespace(
+        _active_analysis_generation=3,
+        _active_single_run_id=3,
+        _active_batch_id=2,
+        _batch_errors=[],
+        _batch_pending_results={},
+        _source_revision_payload=lambda workspace: {},
+        _run_next_batch_analysis=lambda generation: accepted.append("batch"),
+        _complete_single_analysis=lambda *args: accepted.append("single"),
+        _active_single_context=("new-single", {}),
+    )
+
+    MainWindow._on_batch_analysis_finished(
+        owner, 2, "old-batch", None, frame(), None
+    )
+    MainWindow._on_single_analysis_finished(
+        owner, 3, "new-single", {}, None, frame(), None
+    )
+
+    assert accepted == ["single"]
+    assert owner._batch_pending_results == {}
+
+
+def test_worker_registry_holds_overlapping_runs_until_completion_signal():
+    class Signal:
+        def __init__(self):
+            self.callbacks = []
+
+        def connect(self, callback):
+            self.callbacks.append(callback)
+
+        def emit(self):
+            for callback in list(self.callbacks):
+                callback()
+
+    first = SimpleNamespace(thread_completed=Signal())
+    second = SimpleNamespace(thread_completed=Signal())
+    owner = SimpleNamespace(_analysis_workers={})
+    owner._release_analysis_worker = MethodType(
+        MainWindow._release_analysis_worker, owner
+    )
+
+    MainWindow._register_analysis_worker(owner, (1, "single"), first)
+    MainWindow._register_analysis_worker(owner, (2, "single"), second)
+
+    assert set(owner._analysis_workers) == {(1, "single"), (2, "single")}
+    first.thread_completed.emit()
+    assert set(owner._analysis_workers) == {(2, "single")}
+    second.thread_completed.emit()
+    assert owner._analysis_workers == {}
 
 
 def test_metadata_failure_rolls_back_sessions_cache_view_and_metadata():

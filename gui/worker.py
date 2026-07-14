@@ -15,6 +15,7 @@ class AnalysisWorker(QThread):
     # Signals to communicate with the main GUI
     progress = Signal(str)
     finished = Signal(object, object, object) # struct, full_df, error_msg
+    thread_completed = Signal()
     
     def __init__(self, ws_path, setup_config, bader_exe_path="bader.exe"):
         super().__init__()
@@ -116,3 +117,5 @@ class AnalysisWorker(QThread):
         except Exception as e:
             traceback.print_exc()
             self.finished.emit(None, None, str(e))
+        finally:
+            self.thread_completed.emit()

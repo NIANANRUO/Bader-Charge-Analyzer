@@ -197,6 +197,9 @@ class MainWindow(QMainWindow):
         self._batch_config = None
         self._batch_worker = None
         self._batch_pending_results = {}
+        self._analysis_generation = 0
+        self._active_analysis_generation = None
+        self._analysis_workers = {}
         self._batch_generation = 0
         self._active_batch_id = None
         self._single_config = None
@@ -1329,6 +1332,30 @@ class MainWindow(QMainWindow):
         if self.analysis_panel_3d is not None:
             self.analysis_panel_3d.update_file_status(self.current_ws, imported)
 
+    def _begin_analysis_generation(self, kind):
+        self._analysis_generation += 1
+        generation = self._analysis_generation
+        self._active_analysis_generation = generation
+        if kind == "single":
+            self._active_single_run_id = generation
+            self._active_batch_id = None
+        else:
+            self._active_batch_id = generation
+            self._active_single_run_id = None
+            self._active_single_context = None
+        return generation
+
+    def _register_analysis_worker(self, token, worker):
+        self._analysis_workers[token] = worker
+        worker.thread_completed.connect(
+            lambda key=token, expected=worker:
+            self._release_analysis_worker(key, expected)
+        )
+
+    def _release_analysis_worker(self, token, worker):
+        if self._analysis_workers.get(token) is worker:
+            self._analysis_workers.pop(token, None)
+
     def run_analysis(self, config):
         names = self.get_selected_workspace_names()
         if not names and self.current_ws:
@@ -1349,15 +1376,14 @@ class MainWindow(QMainWindow):
         workspace = self.current_ws
         captured_config = deepcopy(config)
         self._single_config = captured_config
-        self._single_generation += 1
-        run_id = self._single_generation
-        self._active_single_run_id = run_id
+        run_id = self._begin_analysis_generation("single")
         self._active_single_context = (workspace, captured_config)
         ws_path = self.ws_mgr.get_workspace_path(workspace)
         bader_exe = self._find_bader_executable()
 
         from gui.worker import AnalysisWorker  # lazy: pulls in pymatgen chain
         self.worker = AnalysisWorker(ws_path, captured_config, bader_exe)
+        self._register_analysis_worker((run_id, "single"), self.worker)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(
             lambda struct, df, err, rid=run_id, ws=workspace, cfg=captured_config:
@@ -1622,9 +1648,7 @@ class MainWindow(QMainWindow):
             self._request_3d_sync()
 
     def _start_batch_analysis(self, names, config):
-        self._batch_generation += 1
-        batch_id = self._batch_generation
-        self._active_batch_id = batch_id
+        batch_id = self._begin_analysis_generation("batch")
         self._batch_queue = list(names)
         self._batch_errors = []
         self._batch_pending_results = {}
@@ -1637,7 +1661,10 @@ class MainWindow(QMainWindow):
 
     def _run_next_batch_analysis(self, batch_id=None):
         batch_id = self._active_batch_id if batch_id is None else batch_id
-        if batch_id != self._active_batch_id:
+        if (
+            batch_id != self._active_analysis_generation
+            or batch_id != self._active_batch_id
+        ):
             return
         if not self._batch_queue:
             self._finish_batch_analysis(batch_id)
@@ -1650,6 +1677,9 @@ class MainWindow(QMainWindow):
 
         from gui.worker import AnalysisWorker  # lazy: pulls in pymatgen chain
         self._batch_worker = AnalysisWorker(ws_path, cfg, bader_exe)
+        self._register_analysis_worker(
+            (batch_id, "batch", workspace), self._batch_worker
+        )
         self._batch_worker.progress.connect(self.update_progress)
         self._batch_worker.finished.connect(
             lambda struct, df, err, bid=batch_id, ws=workspace:
@@ -1664,7 +1694,10 @@ class MainWindow(QMainWindow):
         self._batch_worker.start()
 
     def _on_batch_analysis_finished(self, batch_id, workspace, struct, df, err):
-        if batch_id != self._active_batch_id:
+        if (
+            batch_id != self._active_analysis_generation
+            or batch_id != self._active_batch_id
+        ):
             return
         if err:
             self._batch_errors.append(f"{workspace}: {err}")
@@ -1727,7 +1760,10 @@ class MainWindow(QMainWindow):
 
     def _finish_batch_analysis(self, batch_id=None):
         batch_id = self._active_batch_id if batch_id is None else batch_id
-        if batch_id != self._active_batch_id:
+        if (
+            batch_id != self._active_analysis_generation
+            or batch_id != self._active_batch_id
+        ):
             return
         self.lbl_status_indicator.setText("\u25cf \u5c31\u7eea")
         self.lbl_status_indicator.setStyleSheet(
@@ -1741,6 +1777,7 @@ class MainWindow(QMainWindow):
             )
             self._batch_pending_results = {}
             self._active_batch_id = None
+            self._active_analysis_generation = None
             return
 
         scopes = {
@@ -1755,6 +1792,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "\u6279\u91cf\u5206\u6790\u5931\u8d25", str(exc))
             self._batch_pending_results = {}
             self._active_batch_id = None
+            self._active_analysis_generation = None
             return
 
         for workspace, payload in self._batch_pending_results.items():
@@ -1765,6 +1803,7 @@ class MainWindow(QMainWindow):
             self._refresh_committed_views(names)
         self._batch_pending_results = {}
         self._active_batch_id = None
+        self._active_analysis_generation = None
 
     def update_progress(self, msg):
         pass
@@ -1836,9 +1875,13 @@ class MainWindow(QMainWindow):
     def _on_single_analysis_finished(
         self, run_id, workspace, config, struct, df, err
     ):
-        if run_id != self._active_single_run_id:
+        if (
+            run_id != self._active_analysis_generation
+            or run_id != self._active_single_run_id
+        ):
             return
         self._active_single_run_id = None
+        self._active_analysis_generation = None
         self._active_single_context = None
         self._complete_single_analysis(workspace, config, struct, df, err)
 
