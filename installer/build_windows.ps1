@@ -153,7 +153,7 @@ try {
 
     Write-Host "Build complete."
     Write-Host "Portable app: $AppExe"
-    Write-Host "Installer: $(Join-Path $DistDir 'BaderChargeAnalyzer_Setup_v0.1.2.exe')"
+    Write-Host "Installer: $(Join-Path $DistDir 'BaderChargeAnalyzer_Setup_v0.2.0.exe')"
 }
 finally {
     Pop-Location
