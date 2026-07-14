@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from copy import deepcopy
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, 
                                QLabel, QLineEdit, QRadioButton, QButtonGroup, 
                                QPushButton, QCheckBox, QScrollArea, QFrame, QComboBox, QSlider,
@@ -6,17 +8,28 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 import qtawesome as qta
+from gui.analysis_dialogs import FragmentAnalysisDialog, WorkspaceTargetDialog
 from gui.components.collapsible import CollapsiblePanel
 
 class AnalysisPanel(QWidget):
     request_calculation = Signal(dict)
+    draft_scope_changed = Signal(str)
     request_export_csv = Signal()
+    request_export_full_csv = Signal()
     request_export_image = Signal()
     request_export_fragments = Signal()
+    workspace_targets_changed = Signal(dict)
+    fragments_changed = Signal(dict, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._selected_workspaces = []
+        self._current_workspace = None
+        self._workspace_targets = {}
+        self._fragments = {}
+        self._fragment_results = []
+        self._committed_scope = None
+        self._committed_atom_count = None
         self.init_ui()
         
     def init_ui(self):
@@ -25,7 +38,9 @@ class AnalysisPanel(QWidget):
         main_layout.setSpacing(5)
         
         scroll = QScrollArea()
+        self.scroll_area = scroll
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("background: transparent;")
         
@@ -67,54 +82,52 @@ class AnalysisPanel(QWidget):
         grp_target.addWidget(QLabel("目标原子："))
         self.line_target = QLineEdit()
         self.line_target.setPlaceholderText("例如 1-10, 15")
+        self.line_target.textChanged.connect(self._on_draft_scope_changed)
         grp_target.addWidget(self.line_target)
 
-        self.btn_apply_target_to_all = QPushButton("\u6240\u9009\u5de5\u4f5c\u533a\u5747\u4f7f\u7528\u5f53\u524d\u8f93\u5165")
-        self.btn_apply_target_to_all.clicked.connect(self._apply_target_to_selected)
-        self.btn_apply_target_to_all.setVisible(False)
-        grp_target.addWidget(self.btn_apply_target_to_all)
+        self.btn_use_all_atoms = QPushButton("使用全部原子")
+        self.btn_use_all_atoms.clicked.connect(self.use_all_atoms)
+        grp_target.addWidget(self.btn_use_all_atoms)
 
-        self.target_table = QTableWidget()
-        self.target_table.setColumnCount(2)
-        self.target_table.setHorizontalHeaderLabels(["\u5de5\u4f5c\u533a", "\u76ee\u6807\u539f\u5b50"])
-        self.target_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.target_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.target_table.verticalHeader().setVisible(False)
-        self.target_table.setMaximumHeight(150)
-        self.target_table.setVisible(False)
-        grp_target.addWidget(self.target_table)
-        
-        grp_target.addWidget(QLabel("片段求和："))
+        self.lbl_target_scope = QLabel("当前生效：尚未分析")
+        self.lbl_target_scope.setStyleSheet("color: #555;")
+        self.lbl_target_scope.setWordWrap(True)
+        self.lbl_active_scope = self.lbl_target_scope
+        grp_target.addWidget(self.lbl_target_scope)
+
+        self.lbl_selection_summary = QLabel("未选择工作区")
+        self.lbl_selection_summary.setStyleSheet("color: #666;")
+        self.lbl_selection_summary.setWordWrap(True)
+        grp_target.addWidget(self.lbl_selection_summary)
+
+        self.btn_edit_targets = QPushButton(" 批量设置目标")
+        self.btn_edit_targets.setIcon(qta.icon("fa5s.edit"))
+        self.btn_edit_targets.setToolTip("为每个已选工作区设置独立的目标原子表达式")
+        self.btn_edit_targets.clicked.connect(self.open_target_dialog)
+        self.btn_edit_targets.setVisible(False)
+        grp_target.addWidget(self.btn_edit_targets)
+
+        # Kept for backward-compatible calculation configuration migration.
         self.line_fragment = QLineEdit()
-        self.line_fragment.setPlaceholderText("例如 1-15")
         self.line_fragment.setVisible(False)
-        self.fragment_table = QTableWidget()
-        self.fragment_table.setColumnCount(2)
-        self.fragment_table.setHorizontalHeaderLabels(["片段名称", "默认原子表达式"])
-        self.fragment_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.fragment_table.verticalHeader().setVisible(False)
-        self.fragment_table.setMaximumHeight(180)
-        grp_target.addWidget(self.fragment_table)
-        fragment_actions = QHBoxLayout()
-        self.btn_add_fragment = QPushButton("新增片段")
-        self.btn_remove_fragment = QPushButton("删除片段")
-        self.btn_add_fragment.clicked.connect(lambda: self.add_fragment_row())
-        self.btn_remove_fragment.clicked.connect(self.remove_selected_fragment)
-        fragment_actions.addWidget(self.btn_add_fragment)
-        fragment_actions.addWidget(self.btn_remove_fragment)
-        grp_target.addLayout(fragment_actions)
-        self.fragment_results = QTableWidget()
-        self.fragment_results.setColumnCount(8)
-        self.fragment_results.setHorizontalHeaderLabels(
-            ["工作区", "片段", "表达式", "原子数", "总和(e)",
-             "平均值(e)", "最大值(e)", "最小值(e)"]
-        )
-        self.fragment_results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.fragment_results.verticalHeader().setVisible(False)
-        self.fragment_results.setMaximumHeight(190)
-        grp_target.addWidget(self.fragment_results)
+        self.lbl_advanced_analysis = QLabel("高级分析（可选）")
+        self.lbl_advanced_analysis.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        grp_target.addWidget(self.lbl_advanced_analysis)
+        self.lbl_fragment_summary = QLabel("尚未定义片段")
+        self.lbl_fragment_summary.setStyleSheet("color: #666;")
+        self.lbl_fragment_summary.setWordWrap(True)
+        grp_target.addWidget(self.lbl_fragment_summary)
+
+        self.btn_manage_fragments = QPushButton(" 管理片段")
+        self.btn_manage_fragments.setIcon(qta.icon("fa5s.layer-group"))
+        self.btn_manage_fragments.clicked.connect(self.open_fragment_dialog)
+        self.btn_manage_fragments.setEnabled(False)
+        grp_target.addWidget(self.btn_manage_fragments)
+
         self.btn_export_fragments = QPushButton("导出片段统计")
+        self.btn_export_fragments.setIcon(qta.icon("fa5s.file-export"))
         self.btn_export_fragments.clicked.connect(self.request_export_fragments.emit)
+        self.btn_export_fragments.setVisible(False)
         grp_target.addWidget(self.btn_export_fragments)
         layout.addWidget(grp_target)
         
@@ -134,14 +147,18 @@ class AnalysisPanel(QWidget):
         self.btn_csv.clicked.connect(self.request_export_csv.emit)
         self.btn_img = QPushButton(" 图片")
         self.btn_img.clicked.connect(self.request_export_image.emit)
+        self.btn_export_full_csv = QPushButton("导出完整原始结果")
+        self.btn_export_full_csv.clicked.connect(self.request_export_full_csv.emit)
         self.btn_csv.setEnabled(False)
         self.btn_img.setEnabled(False)
+        self.btn_export_full_csv.setEnabled(False)
         btn_exp_lay.addWidget(self.btn_csv)
         btn_exp_lay.addWidget(self.btn_img)
         
         grp_calc.addWidget(self.btn_calc)
         grp_calc.addWidget(self.lbl_summary)
         grp_calc.addLayout(btn_exp_lay)
+        grp_calc.addWidget(self.btn_export_full_csv)
         layout.addWidget(grp_calc)
         
         layout.addStretch()
@@ -207,6 +224,40 @@ class AnalysisPanel(QWidget):
         self.btn_csv.setEnabled(True)
         self.btn_img.setEnabled(True)
 
+    def set_committed_scope(self, expression, atom_count):
+        """Record the active analysis scope independently from the editable draft."""
+        self._committed_scope = str(expression or "").strip()
+        self._committed_atom_count = atom_count
+        self.btn_export_full_csv.setEnabled(True)
+        self._refresh_scope_state()
+
+    def _on_draft_scope_changed(self, expression):
+        self._refresh_scope_state()
+        self.draft_scope_changed.emit(str(expression).strip())
+
+    def use_all_atoms(self):
+        """Clear only the editable draft; analysis remains an explicit action."""
+        self.line_target.clear()
+
+    def _refresh_scope_state(self):
+        if self._committed_scope is None:
+            self.lbl_target_scope.setText("当前生效：尚未分析")
+            self.btn_calc.setText(" 计算 / 分析")
+            return
+
+        scope_text = self._committed_scope or "全部原子"
+        count_text = (
+            f"（{self._committed_atom_count} 个原子）"
+            if self._committed_atom_count is not None
+            else ""
+        )
+        dirty = self.line_target.text().strip() != self._committed_scope
+        suffix = "\n有未应用更改" if dirty else ""
+        self.lbl_target_scope.setText(
+            f"当前生效：{scope_text}{count_text}{suffix}"
+        )
+        self.btn_calc.setText(" 应用范围并分析" if dirty else " 重新分析")
+
     def emit_calculation(self):
         config = {
             "zval": {"mode": "auto" if self.rad_auto.isChecked() else "manual", "manual_str": self.txt_manual_zval.text().strip()},
@@ -217,115 +268,87 @@ class AnalysisPanel(QWidget):
         }
         self.request_calculation.emit(config)
 
-    def set_selected_workspaces(self, names, current_targets=None):
-        """Refresh the optional per-workspace target table."""
+    def set_selected_workspaces(self, names, current_targets=None, current_workspace=None):
+        """Refresh the compact selection summary and dialog context."""
         self._selected_workspaces = list(names or [])
-        current_targets = current_targets or {}
-        multi = len(self._selected_workspaces) > 1
-        self.btn_apply_target_to_all.setVisible(multi)
-        self.target_table.setVisible(multi)
-        self.target_table.setRowCount(len(self._selected_workspaces) if multi else 0)
-
-        if not multi:
-            self._rebuild_fragment_columns()
-            return
-
-        default_target = self.line_target.text().strip()
-        for row, name in enumerate(self._selected_workspaces):
-            name_item = QTableWidgetItem(name)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            self.target_table.setItem(row, 0, name_item)
-            self.target_table.setItem(
-                row, 1, QTableWidgetItem(current_targets.get(name, default_target))
-            )
-        self._rebuild_fragment_columns()
+        self._current_workspace = current_workspace
+        self._workspace_targets = dict(current_targets or {})
+        count = len(self._selected_workspaces)
+        if count:
+            self.lbl_selection_summary.setText(f"已选择 {count} 个工作区")
+        elif self._current_workspace:
+            self.lbl_selection_summary.setText(f"当前工作区：{self._current_workspace}")
+        else:
+            self.lbl_selection_summary.setText("未选择工作区")
+        self.btn_edit_targets.setVisible(count > 1)
+        self.btn_manage_fragments.setEnabled(bool(count or self._current_workspace))
 
     def add_fragment_row(self, name="", expression=""):
-        row = self.fragment_table.rowCount()
-        self.fragment_table.insertRow(row)
-        self.fragment_table.setItem(row, 0, QTableWidgetItem(name))
-        self.fragment_table.setItem(row, 1, QTableWidgetItem(expression))
-        for column in range(2, self.fragment_table.columnCount()):
-            self.fragment_table.setItem(row, column, QTableWidgetItem(""))
-
-    def remove_selected_fragment(self):
-        rows = sorted(
-            {index.row() for index in self.fragment_table.selectedIndexes()},
-            reverse=True,
-        )
-        for row in rows:
-            self.fragment_table.removeRow(row)
+        """Compatibility helper used by existing integrations and tests."""
+        if name:
+            self._fragments[name] = {"expression": expression, "overrides": {}}
+            self._update_fragment_summary()
 
     def get_fragments(self):
-        fragments = {}
-        for row in range(self.fragment_table.rowCount()):
-            name_item = self.fragment_table.item(row, 0)
-            expression_item = self.fragment_table.item(row, 1)
-            name = name_item.text().strip() if name_item else ""
-            expression = expression_item.text().strip() if expression_item else ""
-            if not name:
-                continue
-            overrides = {}
-            for column, workspace in enumerate(self._selected_workspaces, start=2):
-                item = self.fragment_table.item(row, column)
-                value = item.text().strip() if item else ""
-                if value:
-                    overrides[workspace] = value
-            fragments[name] = {"expression": expression, "overrides": overrides}
-        return fragments
+        return deepcopy(self._fragments)
 
     def set_fragments(self, fragments):
-        self.fragment_table.setRowCount(0)
-        for name, definition in (fragments or {}).items():
-            self.add_fragment_row(name, definition.get("expression", ""))
-            row = self.fragment_table.rowCount() - 1
-            overrides = definition.get("overrides", {}) or {}
-            for column, workspace in enumerate(self._selected_workspaces, start=2):
-                self.fragment_table.setItem(
-                    row, column, QTableWidgetItem(overrides.get(workspace, ""))
-                )
-
-    def _rebuild_fragment_columns(self):
-        existing = self.get_fragments()
-        self.fragment_table.setColumnCount(2 + len(self._selected_workspaces))
-        self.fragment_table.setHorizontalHeaderLabels(
-            ["片段名称", "默认原子表达式"] + self._selected_workspaces
-        )
-        self.set_fragments(existing)
+        self._fragments = deepcopy(fragments or {})
+        self._update_fragment_summary()
 
     def update_fragment_results(self, rows):
-        self.fragment_results.setRowCount(len(rows))
-        for row_index, result in enumerate(rows):
-            values = [
-                result["workspace"], result["fragment"], result["expression"],
-                str(result["count"]), f'{result["sum"]:.6f}',
-                f'{result["mean"]:.6f}', f'{result["max"]:.6f}',
-                f'{result["min"]:.6f}',
-            ]
-            for column, value in enumerate(values):
-                self.fragment_results.setItem(
-                    row_index, column, QTableWidgetItem(value)
-                )
+        self._fragment_results = deepcopy(list(rows or []))
+        self._update_fragment_summary()
+        self.btn_export_fragments.setVisible(bool(self._fragment_results))
 
-    def _apply_target_to_selected(self):
-        target = self.line_target.text().strip()
-        for row in range(self.target_table.rowCount()):
-            item = self.target_table.item(row, 1)
-            if item is None:
-                item = QTableWidgetItem()
-                self.target_table.setItem(row, 1, item)
-            item.setText(target)
+    def _update_fragment_summary(self):
+        fragment_count = len(self._fragments)
+        result_count = len(self._fragment_results)
+        if fragment_count:
+            self.lbl_fragment_summary.setText(
+                f"已定义 {fragment_count} 个片段，已有 {result_count} 条统计结果"
+            )
+        else:
+            self.lbl_fragment_summary.setText("尚未定义片段")
+
+    def open_target_dialog(self):
+        if len(self._selected_workspaces) <= 1:
+            return
+        dialog = WorkspaceTargetDialog(
+            self._selected_workspaces,
+            self._workspace_targets,
+            self.line_target.text().strip(),
+            self,
+        )
+        if dialog.exec():
+            self._workspace_targets = dialog.targets()
+            self.workspace_targets_changed.emit(dict(self._workspace_targets))
+
+    def open_fragment_dialog(self):
+        workspaces = self._selected_workspaces or (
+            [self._current_workspace] if self._current_workspace else []
+        )
+        dialog = FragmentAnalysisDialog(
+            workspaces,
+            self._fragments,
+            self._fragment_results,
+            self,
+        )
+        dialog.request_export.connect(self.request_export_fragments.emit)
+        if dialog.exec():
+            definitions = dialog.fragments()
+            self._fragments = deepcopy(definitions)
+            self._update_fragment_summary()
+            self.fragments_changed.emit(definitions, list(workspaces))
 
     def _targets_by_workspace(self):
         if len(self._selected_workspaces) <= 1:
             return {}
-        targets = {}
-        for row in range(self.target_table.rowCount()):
-            name_item = self.target_table.item(row, 0)
-            target_item = self.target_table.item(row, 1)
-            if name_item is not None:
-                targets[name_item.text()] = target_item.text().strip() if target_item else ""
-        return targets
+        default_target = self.line_target.text().strip()
+        return {
+            workspace: self._workspace_targets.get(workspace, default_target)
+            for workspace in self._selected_workspaces
+        }
 
 class AnalysisPanel3D(QWidget):
     """Right sidebar for the 3D View tab"""
