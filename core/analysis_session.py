@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from core.selection import SelectionResolver
+from core.selection import SelectionError, SelectionResolver
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,13 @@ class AnalysisSessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, AnalysisSession] = {}
 
+    def _stored_session(self, workspace_id: str) -> AnalysisSession:
+        return self._sessions[workspace_id]
+
+    @staticmethod
+    def _snapshot(session: AnalysisSession) -> AnalysisSession:
+        return replace(session, full_result=session.full_result.copy(deep=True))
+
     @staticmethod
     def _elements_for(session: AnalysisSession) -> list[str]:
         return (
@@ -45,7 +52,7 @@ class AnalysisSessionStore:
     def put_full_result(
         self, workspace_id: str, payload: Mapping[str, Any]
     ) -> AnalysisSession:
-        full_result = payload["df"]
+        full_result = payload["df"].copy(deep=True)
         previous = self._sessions.get(workspace_id)
         committed_scope = previous.committed_scope if previous else ""
         elements = (
@@ -68,13 +75,13 @@ class AnalysisSessionStore:
             analysis_revision=previous.analysis_revision if previous else 0,
         )
         self._sessions[workspace_id] = session
-        return session
+        return self._snapshot(session)
 
     def session(self, workspace_id: str) -> AnalysisSession:
-        return self._sessions[workspace_id]
+        return self._snapshot(self._stored_session(workspace_id))
 
     def set_draft(self, workspace_id: str, expression: str) -> None:
-        current = self.session(workspace_id)
+        current = self._stored_session(workspace_id)
         draft_scope = str(expression or "").strip()
         self._sessions[workspace_id] = replace(
             current, draft_scope=draft_scope
@@ -88,31 +95,37 @@ class AnalysisSessionStore:
         # Phase one only reads and validates, so any failure leaves every
         # existing session untouched.
         for workspace_id, expression in scopes.items():
-            current = self.session(workspace_id)
+            current = self._stored_session(workspace_id)
             committed_scope = str(expression or "").strip()
-            selected_atom_ids = SelectionResolver.resolve(
-                committed_scope, self._elements_for(current)
-            )
+            try:
+                selected_atom_ids = SelectionResolver.resolve(
+                    committed_scope, self._elements_for(current)
+                )
+            except SelectionError as error:
+                raise SelectionError(
+                    f"{workspace_id}: {committed_scope}: {error}"
+                ) from error
             resolved[workspace_id] = (committed_scope, selected_atom_ids)
 
         # Phase two builds all replacements before publishing them together.
-        committed = {
-            workspace_id: replace(
-                self.session(workspace_id),
+        committed: dict[str, AnalysisSession] = {}
+        for workspace_id, (committed_scope, selected_atom_ids) in resolved.items():
+            current = self._stored_session(workspace_id)
+            committed[workspace_id] = replace(
+                current,
                 draft_scope=committed_scope,
                 committed_scope=committed_scope,
                 selected_atom_ids=selected_atom_ids,
-                analysis_revision=(
-                    self.session(workspace_id).analysis_revision + 1
-                ),
+                analysis_revision=current.analysis_revision + 1,
             )
-            for workspace_id, (committed_scope, selected_atom_ids) in resolved.items()
-        }
         self._sessions.update(committed)
-        return committed
+        return {
+            workspace_id: self._snapshot(session)
+            for workspace_id, session in committed.items()
+        }
 
     def full_df(self, workspace_id: str) -> pd.DataFrame:
-        return self.session(workspace_id).full_result
+        return self._stored_session(workspace_id).full_result.copy(deep=True)
 
     def projected_df(self, workspace_id: str) -> pd.DataFrame:
-        return AnalysisProjection.dataframe(self.session(workspace_id))
+        return AnalysisProjection.dataframe(self._stored_session(workspace_id))

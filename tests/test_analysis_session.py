@@ -40,18 +40,26 @@ def test_batch_commit_is_atomic_when_one_scope_is_invalid():
     store.put_full_result("ws1", payload())
     store.put_full_result("ws2", payload())
     store.commit_scopes({"ws1": "1", "ws2": "2"})
-    before_ws1 = store.session("ws1")
-    before_ws2 = store.session("ws2")
 
     with pytest.raises(SelectionError):
         store.commit_scopes({"ws1": "3", "ws2": "99"})
 
-    assert store.session("ws1") is before_ws1
-    assert store.session("ws2") is before_ws2
     assert store.session("ws1").selected_atom_ids == (1,)
     assert store.session("ws2").selected_atom_ids == (2,)
     assert store.session("ws1").analysis_revision == 1
     assert store.session("ws2").analysis_revision == 1
+
+
+def test_batch_validation_error_identifies_workspace_and_expression():
+    store = AnalysisSessionStore()
+    store.put_full_result("ws1", payload())
+    store.put_full_result("ws2", payload())
+
+    with pytest.raises(SelectionError, match=r"ws2.*99"):
+        store.commit_scopes({"ws1": "3", "ws2": "99"})
+
+    assert store.session("ws1").analysis_revision == 0
+    assert store.session("ws2").analysis_revision == 0
 
 
 def test_full_result_remains_available_outside_scope():
@@ -82,6 +90,37 @@ def test_projection_is_a_copy_of_full_result():
     projected.loc[:, "Bader_Charge"] = 99.0
 
     assert store.full_df("ws").loc[1, "Bader_Charge"] == -0.3
+
+
+def test_put_full_result_takes_ownership_of_a_dataframe_copy():
+    store = AnalysisSessionStore()
+    source = payload()
+    store.put_full_result("ws", source)
+
+    source["df"].loc[0, "Bader_Charge"] = 99.0
+
+    assert store.full_df("ws").loc[0, "Bader_Charge"] == 0.2
+    assert store.projected_df("ws").loc[0, "Bader_Charge"] == 0.2
+
+
+def test_full_df_returns_a_copy():
+    store = AnalysisSessionStore()
+    store.put_full_result("ws", payload())
+
+    full_result = store.full_df("ws")
+    full_result.loc[0, "Bader_Charge"] = 99.0
+
+    assert store.full_df("ws").loc[0, "Bader_Charge"] == 0.2
+
+
+def test_session_returns_a_snapshot_with_a_dataframe_copy():
+    store = AnalysisSessionStore()
+    store.put_full_result("ws", payload())
+
+    session = store.session("ws")
+    session.full_result.loc[0, "Bader_Charge"] = 99.0
+
+    assert store.full_df("ws").loc[0, "Bader_Charge"] == 0.2
 
 
 def test_structure_revision_defaults_to_source_revision():
