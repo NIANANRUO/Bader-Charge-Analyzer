@@ -27,6 +27,26 @@ def test_structure_change_updates_structure_and_source_fingerprints(tmp_path):
     assert after.source_fingerprint != before.source_fingerprint
 
 
+def test_same_size_structure_replacement_with_restored_mtime_updates_fingerprints(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    _write_inputs(workspace, poscar="AAAA")
+    structure_path = workspace / "POSCAR"
+    original_stat = structure_path.stat()
+    before = SourceRevision.from_workspace(workspace)
+
+    structure_path.write_text("BBBB", encoding="utf-8")
+    os.utime(
+        structure_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    after = SourceRevision.from_workspace(workspace)
+
+    assert after.structure_fingerprint != before.structure_fingerprint
+    assert after.source_fingerprint != before.source_fingerprint
+
+
 def test_acf_change_only_updates_source_fingerprint(tmp_path):
     workspace = tmp_path / "workspace"
     _write_inputs(workspace)
@@ -66,10 +86,9 @@ def test_missing_inputs_have_deterministic_fingerprints(tmp_path):
     assert first.source_fingerprint
 
 
-def test_unchanged_inputs_reuse_cached_content_hashes(tmp_path, monkeypatch):
+def test_each_revision_hashes_current_input_contents(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     _write_inputs(workspace)
-    source_revision._cached_content_hash.cache_clear()
     hashed_paths = []
     original = source_revision._hash_file_content
 
@@ -83,16 +102,15 @@ def test_unchanged_inputs_reuse_cached_content_hashes(tmp_path, monkeypatch):
     SourceRevision.from_workspace(workspace)
 
     assert Counter(map(os.path.basename, hashed_paths)) == {
-        os.path.normcase("POSCAR"): 1,
-        os.path.normcase("ACF.dat"): 1,
-        os.path.normcase("POTCAR"): 1,
+        os.path.normcase("POSCAR"): 2,
+        os.path.normcase("ACF.dat"): 2,
+        os.path.normcase("POTCAR"): 2,
     }
 
 
-def test_changed_acf_rehashes_only_acf(tmp_path, monkeypatch):
+def test_changed_acf_rehashes_all_current_inputs(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     _write_inputs(workspace)
-    source_revision._cached_content_hash.cache_clear()
     hashed_paths = []
     original = source_revision._hash_file_content
 
@@ -110,9 +128,9 @@ def test_changed_acf_rehashes_only_acf(tmp_path, monkeypatch):
     SourceRevision.from_workspace(workspace)
 
     assert Counter(map(os.path.basename, hashed_paths)) == {
-        os.path.normcase("POSCAR"): 1,
+        os.path.normcase("POSCAR"): 2,
         os.path.normcase("ACF.dat"): 2,
-        os.path.normcase("POTCAR"): 1,
+        os.path.normcase("POTCAR"): 2,
     }
 
 
