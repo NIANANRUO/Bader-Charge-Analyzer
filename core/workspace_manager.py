@@ -98,6 +98,9 @@ class WorkspaceManager:
         state.setdefault("order", 0)
         state.setdefault("fragments_version", 1)
         state.setdefault("fragments", {})
+        state.setdefault("analysis_scope", "")
+        state.setdefault("analysis_revision", 0)
+        state.setdefault("source_revision", "")
         return state
 
     def create_workspace(self, name):
@@ -183,6 +186,25 @@ class WorkspaceManager:
         self.save_state(name, state)
         return state
 
+    def save_analysis_metadata(
+        self, workspace_name, committed_scope, analysis_revision, source_revision
+    ):
+        """Persist the versioned inputs associated with committed analysis results."""
+        state = self.load_state(workspace_name)
+        state["analysis_scope"] = str(committed_scope or "").strip()
+        state["analysis_revision"] = int(analysis_revision or 0)
+        state["source_revision"] = str(source_revision or "").strip()
+        self.save_state(workspace_name, state)
+
+    def get_analysis_metadata(self, workspace_name):
+        """Return normalized version metadata, including defaults for legacy state."""
+        state = self.load_state(workspace_name)
+        return {
+            "committed_scope": str(state.get("analysis_scope", "") or "").strip(),
+            "analysis_revision": int(state.get("analysis_revision", 0) or 0),
+            "source_revision": str(state.get("source_revision", "") or "").strip(),
+        }
+
     def get_grouped_workspaces(self):
         """Return workspaces grouped by metadata and sorted by order/name."""
         grouped = {group: [] for group in self.get_groups()}
@@ -221,6 +243,8 @@ class WorkspaceManager:
             os.remove(results_path)
         state = self.load_state(workspace_name)
         state["calculated"] = False
+        state["analysis_revision"] = 0
+        state["source_revision"] = ""
         self.save_state(workspace_name, state)
         return True
 

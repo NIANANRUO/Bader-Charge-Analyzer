@@ -51,6 +51,56 @@ def test_critical_file_change_invalidates_results(tmp_path):
     assert manager.load_state("ws1")["calculated"] is False
 
 
+def test_analysis_metadata_round_trip_normalizes_values(tmp_path):
+    manager = WorkspaceManager(tmp_path)
+    manager.create_workspace("ws1")
+
+    manager.save_analysis_metadata(
+        "ws1",
+        committed_scope="  1-3  ",
+        analysis_revision="4",
+        source_revision="  source-hash  ",
+    )
+
+    assert manager.get_analysis_metadata("ws1") == {
+        "committed_scope": "1-3",
+        "analysis_revision": 4,
+        "source_revision": "source-hash",
+    }
+
+
+def test_legacy_workspace_has_safe_analysis_metadata_defaults(tmp_path):
+    manager = WorkspaceManager(tmp_path)
+    workspace = Path(manager.get_workspace_path("legacy"))
+    workspace.mkdir()
+    (workspace / "state.json").write_text('{"name": "legacy"}', encoding="utf-8")
+
+    state = manager.load_state("legacy")
+
+    assert state["analysis_scope"] == ""
+    assert state["analysis_revision"] == 0
+    assert state["source_revision"] == ""
+    assert manager.get_analysis_metadata("legacy") == {
+        "committed_scope": "",
+        "analysis_revision": 0,
+        "source_revision": "",
+    }
+
+
+def test_critical_file_change_clears_versioned_analysis_metadata(tmp_path):
+    manager = WorkspaceManager(tmp_path)
+    manager.create_workspace("ws1")
+    manager.save_analysis_metadata("ws1", "1-3", 7, "old-source")
+
+    assert manager.invalidate_results("ws1", changed_filename="POTCAR") is True
+
+    assert manager.get_analysis_metadata("ws1") == {
+        "committed_scope": "1-3",
+        "analysis_revision": 0,
+        "source_revision": "",
+    }
+
+
 def test_noncritical_file_change_keeps_results(tmp_path):
     manager = WorkspaceManager(tmp_path)
     manager.create_workspace("ws1")
